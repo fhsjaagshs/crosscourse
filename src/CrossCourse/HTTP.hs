@@ -2,7 +2,8 @@
 module CrossCourse.HTTP
 (
   socketApp,
-  startWebSocket
+  startWebSocket,
+  Message(..)
 )
 where
   
@@ -20,7 +21,6 @@ import qualified Crypto.Hash.SHA1 as SHA1
 
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString as B
-import qualified Data.ByteString.Builder as B
 import qualified Data.ByteString.Lazy as BL
 
 import Data.Bool
@@ -42,19 +42,27 @@ import Control.Exception (bracket)
 
 -- TODO: pipe-based stream parsing
 
+data Message = Message {
+  messagePayload :: !BL.ByteString,
+  messageIsBinary :: !Bool
+} deriving (Eq,Show)
+
+type Handler = Message -> (Message -> IO ()) -> IO ()
+
 withTCPSocket :: Port -> (Socket -> IO ()) -> IO ()
 withTCPSocket port f = withSocketsDo $ bracket (bindPortTCP port "*4") sClose f
 
 -- TODO: secure websockets
 -- |Start a websocket WAI app.
-startWebSocket :: Port -- ^ port to run server on
+startWebSocket :: Handler -- ^ function that handles messages
+               -> Port -- ^ port to run server on
                -> IO ()
-startWebSocket port = withTCPSocket port run
+startWebSocket handler port = withTCPSocket port run
   where settings = defaultSettings { settingsPort = port }
-        run sock = runSettingsSocket settings sock socketApp
+        run sock = runSettingsSocket settings sock (socketApp handler)
 
-socketApp :: Application
-socketApp req respond 
+socketApp :: Handler -> Application
+socketApp handler req respond
   | requestMethod req == methodGet = handshake >> respond runSocket
   | otherwise = respond $ responseLBS status400 [] "bad request"
   where
@@ -65,6 +73,7 @@ socketApp req respond
     ensure :: Eq a => a -> Maybe a -> Maybe a
     ensure v ma = maybe Nothing (bool Nothing ma . (v ==)) ma
     
+    -- TODO: make sure this handshake is valid. Something about nonces in the response
     handshake = respond $ fromMaybe (responseLBS status400 [] "bad request") $ do
       ensure "websocket" $ lookup "Upgrade" headers
       ensure "Upgrade" $ lookup "Connection" headers
@@ -81,7 +90,7 @@ socketApp req respond
                 
     runSocket = flip responseRaw fallback $ \src sink -> runEffect $ mkpipe src sink
       where fallback = responseLBS status500 [] "server does not support websockets"
-            mkpipe r w = readPipe r >-> parserPipe >-> writePipe w >-> consumer
+            mkpipe r w = readPipe r >-> parserPipe >-> writePipe w handler
       
 readPipe :: IO B.ByteString -> Producer B.ByteString IO ()
 readPipe src = do
@@ -103,23 +112,21 @@ parserPipe = do
 --     | BinaryFrame
 --     deriving (Eq, Show)
 
-writePipe :: (B.ByteString -> IO ()) -> Pipe Frame (BL.ByteString,Bool) IO ()
-writePipe sink = (await >>= f) >> writePipe sink
+writePipe :: (B.ByteString -> IO ()) -> Handler -> Consumer Frame IO ()
+writePipe sink handler = (await >>= f) >> writePipe sink handler
   where
     f (Frame _ _ _ _ PongFrame _) = return ()
-    f (Frame _ o tw tr PingFrame a) = lift $ sink $ BL.toStrict $ B.toLazyByteString $ encodeFrame $ Frame False o tw tr PongFrame a
-    f (Frame _ _ _ _ CloseFrame _) = lift (myThreadId >>= killThread)
-    f (Frame _ _ _ _ _ payload) = yield (payload,False) -- TODO: continuations
-
-  -- (Frame aheader apayload) <- await
-  -- (Frame bheader bpayload) <- await
-  -- case (frameHdrType aheader,frameHdrType bheader) of
-  --   ()
-  --
-  
-consumer :: Consumer (BL.ByteString,Bool) IO ()
-consumer = do
-  (txt,_) <- await
-  lift $ print txt
-  consumer
+    f (Frame _ o tw tr PingFrame a) = do
+      lift $ putStrLn "pinging"
+      lift $ sendFrame $ Frame True o tw tr PongFrame a
+    f c@(Frame _ _ _ _ CloseFrame _) = do
+      lift $ putStrLn "closing"
+      lift $ sendFrame c
+      lift (myThreadId >>= killThread)
+    -- TODO: continuations
+    f (Frame _ _ _ _ TextFrame payload) = lift $ handler (Message payload False) sendMessage
+    f (Frame _ _ _ _ BinaryFrame payload) = lift $ handler (Message payload True) sendMessage
+    sendFrame = sink . BL.toStrict . encodeFrame
+    sendMessage (Message p True) = sendFrame $ Frame True False False False BinaryFrame p
+    sendMessage (Message p False) = sendFrame $ Frame True False False False TextFrame p
       

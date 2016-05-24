@@ -20,11 +20,8 @@ module CrossCourse.WebSocket
   encodeFrame
 )
 where
-  
--- as described in RFC 6455
--- use
--- https://github.com/jaspervdj/websockets/blob/master/src/Network/WebSockets/Hybi13.hs
--- http://stackoverflow.com/questions/8125507/how-can-i-send-and-receive-websocket-messages-on-the-server-side
+
+-- refer to
 -- https://tools.ietf.org/html/rfc6455#section-5
 
 import qualified Data.ByteString as B
@@ -121,8 +118,8 @@ payload = do
           where i' = (i + 1) `mod` len
                 m  = mask `B.index` i
                 
-encodeFrame :: Frame -> Bz.Builder
-encodeFrame f = mconcat [
+encodeFrame :: Frame -> BL.ByteString
+encodeFrame f = Bz.toLazyByteString $ mconcat [
   Bz.fromWord8 byte0,
   Bz.fromWord8 byte1,
   len,
