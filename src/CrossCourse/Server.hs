@@ -37,7 +37,13 @@ import Control.Monad
 import Control.Exception (bracket)
 import Control.Concurrent (myThreadId,killThread)
 
--- TODO: exit handlers
+{-
+
+TODO:
+- signal/exit handlers
+- forking for multiple connections at once
+
+-}
 
 -- |Start the 'Message' server.
 startServer :: Int  -- ^ port to run server on
@@ -48,7 +54,6 @@ startServer port pipe = withSocketsDo $ bindPortTCP port "*" >>= loop
 
 acceptSocket :: Socket -> Pipe Message Message IO () -> IO ()
 acceptSocket lsock logic = bracket (fst <$> accept lsock) close $ \sock -> do
-  putStrLn "here"
   lock <- newIORef False
   let r = recv sock 4092
       w = sendAll sock
