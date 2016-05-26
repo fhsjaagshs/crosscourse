@@ -6,8 +6,11 @@ import CrossCourse.Server
 import CrossCourse.WebSocket
 
 import Pipes
+
+import Data.UUID
   
 import System.Environment
+
 
 {-
 TODO
@@ -23,7 +26,7 @@ main = do
   port <- maybe 8080 read <$> lookupEnv "PORT"
   startServer port app
   
-app :: Pipe Message Message IO ()
-app = do
+app :: UUID -> Pipe Message Message IO ()
+app userid = do
   Message msg isBinary <- await
   yield $ Message (mappend msg "? That's what she said!") False

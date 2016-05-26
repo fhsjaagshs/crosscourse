@@ -12,76 +12,72 @@ import Network.Socket hiding (recv)
 import Network.Socket.ByteString
 import Data.Streaming.Network (bindPortTCP)
 
-import qualified Crypto.Hash.SHA1 as SHA1
-
+import Data.UUID
+import Data.Binary
+import Data.Binary.Get
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 
-import Data.Bool
-import Data.Maybe
-import Data.Either
-import Data.Monoid
+-- import qualified Data.HashTable.IO as H
 
-import Data.Binary
-import Data.Bits
+import Data.Maybe
 
 import Pipes
 import Pipes.Prelude
-import qualified Pipes.Prelude as P
-
-import Data.IORef
 
 import Control.Monad
 import Control.Exception (bracket)
-import Control.Concurrent (myThreadId,killThread)
+import Control.Concurrent hiding (yield)
 
 {-
-
 TODO:
-
-Process logic
 - signal/exit handlers
-- forking for multiple connections at once
-
-HTTP logic
-- flush body after reading headers
-- optimize & validate HTTP responses
-
+- track connections
+  - wrap 'Socket's in 'MVar's inside any data structure
 -}
+
+type Logic = UUID -> Pipe Message (Socket,Message) IO ()
 
 -- |Start the 'Message' server.
 startServer :: Int  -- ^ port to run server on
-            -> Pipe Message Message IO () -- ^ pipe for receiving and sending messages
+            -> Logic -- ^ server logic based on a pipe
             -> IO ()
-startServer port pipe = withSocketsDo $ bindPortTCP port "*" >>= loop
-  where loop sock = acceptSocket sock pipe >> loop sock
+startServer port logic = withSocketsDo $ bindPortTCP port "*" >>= while (pure True) . acceptSocket logic
 
-acceptSocket :: Socket -> Pipe Message Message IO () -> IO ()
-acceptSocket lsock logic = bracket (fst <$> accept lsock) close $ \sock -> do
-  lock <- newIORef False
-  let r = recv sock 4092
-      w = sendAll sock
-      loop :: IO ()
-      loop = do
-        closed <- readIORef lock
-        when (not closed) $ do
-          runEffect $ repeatM r >-> readEvents >-> handleEvents lock w >-> logic >-> sendMessage w
-          loop
-  
-  hs <- readHandshake r
-  case hs of
-    Nothing -> w $ mkBadRequestResponse "invalid handshake"
-    Just (Handshake _ key _) -> do
-      w $ mkHandshakeResponse key
-      loop
-
-handleEvents :: IORef Bool -> (B.ByteString -> IO ()) -> Pipe Event Message IO ()
-handleEvents lock sink = await >>= f
+acceptSocket :: Logic -> Socket -> IO ()
+acceptSocket logic lsock = bracket (accept lsock) (close' . fst) (uncurry f)
   where
-    f (ReceivedMessageEvent msg) = yield msg >> handleEvents lock sink
-    f (CloseEvent f) = lift $ f sink >> writeIORef lock True
-    f (PingEvent f) = (lift $ f sink) >> handleEvents lock sink
-    
-sendMessage :: (B.ByteString -> IO ()) -> Consumer Message IO ()
-sendMessage w = await >>= lift . w . encodeMessage
+    f :: Socket -> SockAddr -> IO ()
+    f sock saddr = when (isSupportedSockAddr saddr) $ void $ forkIO $ do
+      hs <- readHandshake r
+      case hs of
+        Nothing -> w $ mkBadRequestResponse "invalid handshake"
+        Just (Handshake _ key hdrs) -> do
+          let user = lookup "CrossCourse-User-UUID" hdrs >>= fmap (runGet get . BL.fromStrict) . listToMaybe
+          case user of
+            Nothing -> w $ mkBadRequestResponse "missing/invalid authentication credentials"
+            Just user' -> do
+              w $ mkHandshakeResponse key
+              while (isConnected sock) $ runEffect $
+                repeatM r >-> readEvents >-> eventLogic >-> logic user' >-> messageLogic
+      where
+        r = recv sock 4092
+        w = sendAll sock
+        eventLogic = await >>= f
+          where f (ReceivedMessageEvent m) = yield m >> eventLogic
+                f (CloseEvent f) = lift $ f (sendAll sock) >> close sock
+                f (PingEvent f) = (lift $ f (sendAll sock)) >> eventLogic
+        messageLogic = do
+          (targetSock,msg) <- await
+          lift $ sendAll targetSock $ encodeMessage msg
+
+while :: IO Bool -> IO () -> IO ()          
+while test act = do
+  v <- test
+  when v $ act >> while test act
+  
+close' :: Socket -> IO ()
+close' s@(MkSocket _ _ _ _ status) = do
+  status' <- readMVar status
+  when (status' /= Closed) $ close s
