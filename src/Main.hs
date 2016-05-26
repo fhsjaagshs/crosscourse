@@ -2,13 +2,20 @@
 
 module Main where
   
-import CrossCourse.HTTP
-import CrossCourse.Protocol
+import CrossCourse.Server
+
+import Pipes
   
 import System.Environment
+
+-- TODO: crosscourse protocol
   
 main :: IO ()
-main = lookupEnv "PORT" >>= startWebSocket handler . maybe 8080 read
-
-handler :: Message -> (Message -> IO ()) -> IO ()
-handler message sendMessage = sendMessage message 
+main = do
+  port <- maybe 8080 read <$> lookupEnv "PORT"
+  startServer port app
+  
+app :: Pipe Message Message IO ()
+app = do
+  msg <- await
+  yield $ Message "That's what she said!" False

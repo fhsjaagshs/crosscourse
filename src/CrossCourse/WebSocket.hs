@@ -8,15 +8,20 @@ Maintainer  : nate@symer.io
 Stability   : experimental
 Portability : Cross-Platform
 
+Implements a 'Pipe' that supports the WebSockets protocol
+(as described in https://tools.ietf.org/html/rfc6455)
+
 -}
 
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module CrossCourse.WebSocket
 (
-  Frame(..),
-  FrameType(..),
-  parseFrame,
+  Event(..),
+  Message(..),
+  encodeMessage,
+  readEvents,
+  closeFrame,
   encodeFrame
 )
 where
@@ -24,123 +29,104 @@ where
 -- refer to
 -- https://tools.ietf.org/html/rfc6455#section-5
 
+import CrossCourse.WebSocket.Frame
+
+import Pipes
+import Control.Monad
+
+import Data.Monoid
+import Data.Binary
+import Data.Binary.Get
+import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.Attoparsec.ByteString as A
 
-import qualified Blaze.ByteString.Builder as Bz
-
-import Data.Bool
-import Data.Bits
-import Data.Int
-
-import Data.Binary.Get (getWord16be,getWord64be,runGet)
-import Data.Binary.Put (putWord16be,runPut)
-
--- |A WebSocket packet
-data Frame = Frame {
-  frameFin :: !Bool,
-  frameRsv1 :: !Bool,
-  frameRsv2 :: !Bool,
-  frameRsv3 :: !Bool,
-  frameType :: !FrameType,
-  framePayload :: !BL.ByteString
-} deriving (Eq, Show)
-
--- | The type of a frame. Not all types are allowed for all protocols.
-data FrameType
-    = ContinuationFrame
-    | TextFrame
-    | BinaryFrame
-    | CloseFrame
-    | PingFrame
-    | PongFrame
-    deriving (Eq, Show)
+-- |function that takes a "sink" function and uses it to write a frame.
+type FrameWriter = (B.ByteString -> IO ()) -> IO ()
     
-parseFrame :: B.ByteString -> Either String Frame
-parseFrame = A.eitherResult . A.parse frame  
+data Event
+  = ReceivedMessageEvent Message
+  | CloseEvent FrameWriter
+  | PingEvent FrameWriter
   
-frame :: A.Parser Frame
-frame = header <*> payload
-
--- |Attoparsec parser to parse first byte of WebSocket packet.
-header :: A.Parser (BL.ByteString -> Frame)
-header = do
-  b <- A.anyWord8
-  Frame (fin b) (rsv1 b) (rsv2 b) (rsv3 b) <$> (convertOpcode $ opcode b)
-  where
-    convertOpcode 0x00 = return ContinuationFrame
-    convertOpcode 0x01 = return TextFrame
-    convertOpcode 0x02 = return BinaryFrame
-    convertOpcode 0x08 = return CloseFrame
-    convertOpcode 0x09 = return PingFrame
-    convertOpcode 0x0a = return PongFrame
-    convertOpcode opcode = fail $ "unknown opcode: " ++ show opcode
-    fin    b = b .&. 0x80 == 0x80
-    rsv1   b = b .&. 0x40 == 0x40
-    rsv2   b = b .&. 0x20 == 0x20
-    rsv3   b = b .&. 0x10 == 0x10
-    opcode b = b .&. 0x0f
-    
--- |Attoparsec parser to parse the payload of a WebSocket packet.
-payload :: A.Parser BL.ByteString
-payload = do
-    byte1 <- A.anyWord8
-    let mask = byte1 .&. 0x80 == 0x80
-        lenflag = fromIntegral (byte1 .&. 0x7f)
-
-    len <- case lenflag of
-        126 -> fromIntegral . runGet' getWord16be <$> A.take 2
-        127 -> fromIntegral . runGet' getWord64be <$> A.take 8
-        _   -> return lenflag
-
-    masker <- bool (pure id) (maskPayload <$> A.take 4) mask
-    masker . BL.fromChunks <$> take64 len
-  where
-    runGet' g = runGet g . BL.fromChunks . return
-
-    take64 :: Int64 -> A.Parser [B.ByteString]
-    take64 n
-      | n <= 0    = return []
-      | otherwise = do
-          let n' = min intMax n
-          chunk <- A.take (fromIntegral n')
-          (chunk :) <$> take64 (n - n')
-      where
-        intMax :: Int64
-        intMax = fromIntegral (maxBound :: Int)
-
-    maskPayload :: B.ByteString -> BL.ByteString -> BL.ByteString
-    maskPayload mask = snd . BL.mapAccumL f 0
-      where
-        len     = B.length mask
-        f !i !c = (i', m `xor` c)
-          where i' = (i + 1) `mod` len
-                m  = mask `B.index` i
-                
-encodeFrame :: Frame -> BL.ByteString
-encodeFrame f = Bz.toLazyByteString $ mconcat [
-  Bz.fromWord8 byte0,
-  Bz.fromWord8 byte1,
-  len,
-  Bz.fromLazyByteString $ framePayload f]
-  where
-    byte0  = fin .|. rsv1 .|. rsv2 .|. rsv3 .|. opcode
-    fin    = if frameFin  f then 0x80 else 0x00
-    rsv1   = if frameRsv1 f then 0x40 else 0x00
-    rsv2   = if frameRsv2 f then 0x20 else 0x00
-    rsv3   = if frameRsv3 f then 0x10 else 0x00
-    opcode = case frameType f of
-        ContinuationFrame -> 0x00
-        TextFrame         -> 0x01
-        BinaryFrame       -> 0x02
-        CloseFrame        -> 0x08
-        PingFrame         -> 0x09
-        PongFrame         -> 0x0a
-    byte1 = 0x00 .|. lenflag
-    len'  = BL.length $ framePayload f
-    (lenflag, len)
-        | len' < 126     = (fromIntegral len', mempty)
-        | len' < 0x10000 = (126, Bz.fromWord16be (fromIntegral len'))
-        | otherwise      = (127, Bz.fromWord64be (fromIntegral len'))
+data Message = Message {
+  messagePayload :: !BL.ByteString,
+  messageIsBinary :: !Bool
+} deriving (Eq,Show)
   
+readEvents :: Pipe B.ByteString Event IO ()
+readEvents = parserPipe >-> printerPipe >-> demuxPipe >-> ignorePongPipe >-> eventifyPipe
+
+-- dec
+-- byte 1 : 3
+-- byte 2 : 233
+
+-- |Parses a stream of socket data as @Frame@s.
+parserPipe :: Pipe B.ByteString Frame IO ()
+parserPipe = loop ""
+  where
+    parse :: B.ByteString -> [Frame] -> Either String (B.ByteString,[Frame])
+    parse "" accum = Right ("",accum)
+    parse bs accum = d $ runGetIncremental get
+      where
+        d (Partial f) = d $ f $ Just bs
+        d (Done remaining _ result) = parse remaining (accum ++ [result])
+        d (Fail remaining consumedLen err)
+          | (B.null remaining) && (consumedLen == (fromIntegral $ B.length bs)) = Right (bs,accum)
+          | otherwise = Left err
+    loop bs = do
+      s <- await
+      case parse (bs <> s) [] of
+        Left err -> lift $ print err
+        Right (leftover,frames) -> do
+          mapM_ yield frames
+          when (not $ B.null leftover) $ loop leftover
+  
+printerPipe :: Pipe Frame Frame IO ()
+printerPipe = do
+  f@(Frame _ _ _ _ typ mask pl) <- await
+  let pl' = maybe pl (flip maskPayload pl) mask
+  lift $ print (typ,pl')
+  yield f
+  printerPipe
+  
+demuxPipe :: Pipe Frame Frame IO ()
+demuxPipe = (await >>= awaitConts) >> demuxPipe
+  where
+    awaitConts f@(Frame True _ _ _ _ _ _) = yield f
+    awaitConts (Frame False rsv1 rsv2 rsv3 typ mask pl) = do
+      (Frame fin _ _ _ typ2 mask2 pl2) <- await
+      if typ2 == ContinuationFrame
+        then awaitConts $ Frame fin rsv1 rsv2 rsv3 typ mask (pl <> pl2) -- TODO: properly handle masking concat'd frames
+        else fail "expected continuation frame"
+
+ignorePongPipe :: Pipe Frame Frame IO ()
+ignorePongPipe = do
+  f <- await
+  when ((frameType f) /= PongFrame) $ yield f
+  ignorePongPipe
+  
+eventifyPipe :: Pipe Frame Event IO ()
+eventifyPipe = do
+  (Frame _ _ _ _ typ mask pl) <- await
+  let pl' = maybe pl (flip maskPayload pl) mask
+  case typ of
+    TextFrame -> yield $ ReceivedMessageEvent $ Message pl' False
+    BinaryFrame -> yield $ ReceivedMessageEvent $ Message pl' True
+    CloseFrame -> yield $ CloseEvent (\write -> write $ encodeFrame $ construct CloseFrame pl') -- Frame True False False False CloseFrame Nothing pl)
+    PingFrame -> yield $ PingEvent (\write -> write $ encodeFrame $ construct PongFrame pl') -- Frame True False False False PongFrame Nothing pl)
+    _ -> return ()
+  eventifyPipe
+  where
+    construct typ payload = Frame True False False False typ Nothing payload
+  
+encodeFrame :: Frame -> B.ByteString
+encodeFrame = BL.toStrict . runPut . put
+
+closeFrame :: Frame
+closeFrame = Frame True False False False CloseFrame Nothing ""
+
+-- TODO chunking via continuation frames
+encodeMessage :: Message -> B.ByteString
+encodeMessage (Message p True) = encodeFrame $ Frame True False False False BinaryFrame Nothing p
+encodeMessage (Message p False) = encodeFrame $ Frame True False False False TextFrame Nothing p
