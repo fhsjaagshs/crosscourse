@@ -1,14 +1,14 @@
 {-
 
-Module      : CrossCourse.WebSocket
-Description : Hybi13 WebSocket implementation
+Module      : CrossCourse.WebSocket.HTTP
+Description : HTTP essentials for WebSockets
 Copyright   : (c) Nathaniel Symer, 2015
 License     : MIT
 Maintainer  : nate@symer.io
 Stability   : experimental
 Portability : Cross-Platform
 
-Implements basic HTTP functionality needed for running websockets
+Implements basic HTTP functionality needed for running websockets.
 
 -}
 
@@ -66,7 +66,7 @@ mkHandshakeResponse wskey = BL.toStrict $ runPut $ do
   putHeader "Upgrade" "websocket"
   putHeader "Connection" "Upgrade"
   putHeader "Sec-WebSocket-Accept" $ calculateAccept wskey
-  putHeaderPair "Sec-WebSocket-Protocol" "crosscourse"
+  putHeader "Sec-WebSocket-Protocol" "crosscourse"
   putByteString "\r\n"
   where
     magicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"

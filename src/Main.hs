@@ -3,12 +3,20 @@
 module Main where
   
 import CrossCourse.Server
+import CrossCourse.WebSocket
 
 import Pipes
   
 import System.Environment
 
--- TODO: crosscourse protocol
+{-
+TODO
+
+Chat logic
+- finish "crosscourse" protocol
+  - URI carries path UUID??
+- authentication
+-}
   
 main :: IO ()
 main = do
@@ -17,5 +25,5 @@ main = do
   
 app :: Pipe Message Message IO ()
 app = do
-  msg <- await
-  yield $ Message "That's what she said!" False
+  Message msg isBinary <- await
+  yield $ Message (mappend msg "? That's what she said!") False

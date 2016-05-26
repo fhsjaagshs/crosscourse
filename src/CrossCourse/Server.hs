@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module CrossCourse.Server
 (
-  Message(..),
   startServer
 )
 where
@@ -40,9 +39,14 @@ import Control.Concurrent (myThreadId,killThread)
 {-
 
 TODO:
+
+Process logic
 - signal/exit handlers
 - forking for multiple connections at once
+
+HTTP logic
 - flush body after reading headers
+- optimize & validate HTTP responses
 
 -}
 
@@ -66,7 +70,6 @@ acceptSocket lsock logic = bracket (fst <$> accept lsock) close $ \sock -> do
           loop
   
   hs <- readHandshake r
-  Prelude.print hs
   case hs of
     Nothing -> w $ mkBadRequestResponse "invalid handshake"
     Just (Handshake _ key _) -> do
@@ -74,11 +77,11 @@ acceptSocket lsock logic = bracket (fst <$> accept lsock) close $ \sock -> do
       loop
 
 handleEvents :: IORef Bool -> (B.ByteString -> IO ()) -> Pipe Event Message IO ()
-handleEvents lock sink = (await >>= f) >> handleEvents lock sink
+handleEvents lock sink = await >>= f
   where
-    f (ReceivedMessageEvent msg) = yield msg
-    f (CloseEvent f) = lift $ (f sink) >> writeIORef lock True
-    f (PingEvent f) = lift $ f sink
+    f (ReceivedMessageEvent msg) = yield msg >> handleEvents lock sink
+    f (CloseEvent f) = lift $ f sink >> writeIORef lock True
+    f (PingEvent f) = (lift $ f sink) >> handleEvents lock sink
     
 sendMessage :: (B.ByteString -> IO ()) -> Consumer Message IO ()
 sendMessage w = await >>= lift . w . encodeMessage

@@ -29,6 +29,13 @@ where
 -- refer to
 -- https://tools.ietf.org/html/rfc6455#section-5
 
+{-
+TODO
+
+- chunk larger text/binary frames, see 'encodeMessage'
+
+-}
+
 import CrossCourse.WebSocket.Frame
 
 import Pipes
