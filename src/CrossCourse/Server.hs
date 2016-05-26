@@ -42,6 +42,7 @@ import Control.Concurrent (myThreadId,killThread)
 TODO:
 - signal/exit handlers
 - forking for multiple connections at once
+- flush body after reading headers
 
 -}
 
