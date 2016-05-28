@@ -48,8 +48,7 @@ TODO
 
 data Handshake = Handshake {
   handshakePathInfo :: [B.ByteString],
-  handshakeWSKey :: B.ByteString,
-  handshakeHeaders :: [(B.ByteString,[B.ByteString])]
+  handshakeWSKey :: B.ByteString
 } deriving (Eq,Show)
 
 splitPath :: B.ByteString -> [B.ByteString]
@@ -114,5 +113,5 @@ readHandshake src = do
                         Just [key],
                         Just ["13"],
                         Just ["crosscourse"]) ->
-                        Just $ Handshake (splitPath uri) key hdrs'
+                        Just $ Handshake (splitPath uri) key
                        _ -> Nothing

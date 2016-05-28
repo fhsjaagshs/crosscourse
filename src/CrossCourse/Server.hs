@@ -7,6 +7,7 @@ where
   
 import CrossCourse.WebSocket
 import CrossCourse.WebSocket.HTTP
+import CrossCourse.Logic
 
 import Network.Socket hiding (recv)
 import Network.Socket.ByteString
@@ -19,53 +20,50 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 
--- import qualified Data.HashTable.IO as H
-
 import Data.Maybe
 
 import Pipes
 import Pipes.Prelude
 
 import Control.Monad
-import Control.Exception (bracket)
+-- import Control.Monad.Fix (fix)
 import Control.Concurrent hiding (yield)
 
 {-
 TODO:
 - signal/exit handlers
-- track connections
-  - wrap 'Socket's in 'MVar's inside any data structure
+- supply socket to logic
 -}
-
-type Logic = UUID -> Pipe Message (Socket,Message) IO ()
 
 -- |Start the 'Message' server.
 startServer :: Int  -- ^ port to run server on
             -> Logic -- ^ server logic based on a pipe
             -> IO ()
-startServer port logic = withSocketsDo $ bindPortTCP port "*" >>= while (pure True) . acceptSocket logic
+startServer port logic = withSocketsDo $ do
+  lsock <- bindPortTCP port "*"
+  while (pure True) $ do
+    tid <- acceptSocket logic port
 
-acceptSocket :: Logic -> Socket -> IO ()
-acceptSocket logic lsock = bracket (accept lsock) (close' . fst) (uncurry f)
+acceptSocket :: Logic -> Socket -> IO ThreadId
+acceptSocket logic lsock = accept lsock >>= uncurry f
   where
-    f :: Socket -> SockAddr -> IO ()
-    f sock saddr = when (isSupportedSockAddr saddr) $ void $ forkIO $ do
-      hs <- readHandshake r
-      case hs of
-        Nothing -> w $ mkBadRequestResponse "invalid handshake"
-        Just (Handshake _ key hdrs) -> do
-          let user = lookup "CrossCourse-User-UUID" hdrs >>= fmap (runGet get . BL.fromStrict) . listToMaybe
-          case user of
-            Nothing -> w $ mkBadRequestResponse "missing/invalid authentication credentials"
-            Just user' -> do
-              w $ mkHandshakeResponse key
-              while (isConnected sock) $ runEffect $
-                repeatM r >-> readEvents >-> eventLogic >-> logic user' >-> messageLogic
+    rlen = 4092
+    shakeHand sock success = do
+      hs <- readHandshake $ recv sock rlen
+      maybe (sendAll sock $ mkBadRequestResponse "invalid handshake") success $ do
+        Handshake _ key hdrs <- hs
+        user <- lookup "CrossCourse-User-UUID" hdrs >>= listToMaybe
+        return $ runGet get $ BL.fromStrict user
+    f sock saddr = when (isSupportedSockAddr saddr)
+                 $ forkIO
+                 $ shakeHand sock $ \pathInfo -> do
+      auth <- newMVar Nothing
+      while (isConnected sock) $ runEffect $ mkPipe auth
+      -- TODO: handle disconnection
       where
-        r = recv sock 4092
-        w = sendAll sock
+        mkPipe auth = repeatM (recv sock rlen) >-> readEvents >-> eventLogic >-> logic auth >-> messageLogic
         eventLogic = await >>= f
-          where f (ReceivedMessageEvent m) = yield m >> eventLogic
+          where f (MessageEvent m) = yield (sock,m) >> eventLogic
                 f (CloseEvent f) = lift $ f (sendAll sock) >> close sock
                 f (PingEvent f) = (lift $ f (sendAll sock)) >> eventLogic
         messageLogic = do
@@ -77,7 +75,7 @@ while test act = do
   v <- test
   when v $ act >> while test act
   
-close' :: Socket -> IO ()
-close' s@(MkSocket _ _ _ _ status) = do
-  status' <- readMVar status
-  when (status' /= Closed) $ close s
+-- close' :: Socket -> IO ()
+-- close' s@(MkSocket _ _ _ _ status) = do
+--   status' <- readMVar status
+--   when (status' /= Closed) $ close s
