@@ -17,29 +17,24 @@ Implements a 'Pipe' that supports the WebSockets protocol
 
 module CrossCourse.WebSocket
 (
-  Event(..),
   Message(..),
-  encodeMessage,
-  readEvents,
-  closeFrame,
-  encodeFrame
+  websocket,
+  closeWebsocket
 )
 where
 
--- refer to
--- https://tools.ietf.org/html/rfc6455#section-5
-
 {-
 TODO
-
 - chunk larger text/binary frames, see 'encodeMessage'
-
 -}
 
 import CrossCourse.WebSocket.Frame
 
 import Pipes
+import qualified Pipes.Prelude as P
 import Control.Monad
+import Control.Monad.Fix
+import System.IO
 
 import Data.Monoid
 import Data.Binary
@@ -47,88 +42,81 @@ import Data.Binary.Get
 import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-
--- |function that takes a "sink" function and uses it to write a frame.
-type FrameWriter = (B.ByteString -> IO ()) -> IO ()
-    
-data Event
-  = MessageEvent Message
-  | CloseEvent FrameWriter
-  | PingEvent FrameWriter
+import qualified Data.ByteString.Lazy.Char8 as BLC
   
 data Message = Message {
   messagePayload :: !BL.ByteString,
   messageIsBinary :: !Bool
 } deriving (Eq,Show)
   
--- |Reads WebSocket 'Frame's and constructs 'Event's based on them.
-readEvents :: Pipe B.ByteString Event IO ()
-readEvents = parserPipe >-> demuxPipe >-> ignorePongPipe >-> eventifyPipe
+-- |WebSocket logic. Responds to incoming frames, closing @hdl@ if necessary.
+-- Yields 'Message's to be used in a pipeline.
+websocket :: Handle -> Producer Message IO ()
+websocket hdl = fromHandle' hdl >-> parseFrames >-> demuxFrames >-> evalFrames hdl
+  where
+    fromHandle' h = fix $ \next -> do
+      eof <- lift $ hIsEOF h
+      unless eof $ do
+        (liftIO $ B.hGet h 4092) >>= yield
+        next
 
--- |Parses a stream of socket data as @Frame@s.
-parserPipe :: Pipe B.ByteString Frame IO ()
-parserPipe = loop ""
+-- |Parses a stream of bytes as @Frame@s.
+parseFrames :: Pipe B.ByteString Frame IO ()
+parseFrames = loop ""
   where
     parse :: B.ByteString -> [Frame] -> Either String (B.ByteString,[Frame])
-    parse "" accum = Right ("",accum)
     parse bs accum = d $ runGetIncremental get
+      where d (Partial f) = d $ f $ Just bs
+            d (Done remaining _ result) = parse remaining (accum ++ [result])
+            d (Fail "" _ _) = Right (bs,accum) -- consumed @bs@, not enough input to finish
+            d (Fail _ _ err) = Left err -- encountered an error parsing
+    loop = fix $ \next bs -> await >>= either l (r next) . flip parse [] . mappend bs
       where
-        d (Partial f) = d $ f $ Just bs
-        d (Done remaining _ result) = parse remaining (accum ++ [result])
-        d (Fail remaining consumedLen err)
-          | (B.null remaining) && (consumedLen == (fromIntegral $ B.length bs)) = Right (bs,accum)
-          | otherwise = Left err
-    loop bs = do
-      s <- await
-      case parse (bs <> s) [] of
-        Left err -> lift $ print err
-        Right (leftover,frames) -> do
-          mapM_ yield frames
-          when (not $ B.null leftover) $ loop leftover
-  
--- |Demultiplexes 'Frame's.
-demuxPipe :: Pipe Frame Frame IO ()
-demuxPipe = (await >>= awaitConts) >> demuxPipe
-  where
-    awaitConts f@(Frame True _ _ _ _ _ _) = yield f
-    awaitConts (Frame False rsv1 rsv2 rsv3 typ mask pl) = do
-      (Frame fin _ _ _ typ2 mask2 pl2) <- await
-      if typ2 == ContinuationFrame
-        then awaitConts $ Frame fin rsv1 rsv2 rsv3 typ mask (pl <> pl2) -- TODO: properly handle masking concat'd frames
-        else fail "expected continuation frame"
+        r next ("",frames) = mapM_ yield frames
+        r next (leftover,frames) = mapM_ yield frames >> next leftover
+        l = yield . Frame True False False False CloseFrame Nothing . mappend (runPut $ putWord16be 1) . BLC.pack
 
--- |Ignore pong 'Frame's because we're not supposed to respond to them.
-ignorePongPipe :: Pipe Frame Frame IO ()
-ignorePongPipe = do
-  f <- await
-  when ((frameType f) /= PongFrame) $ yield f
-  ignorePongPipe
-  
--- |Construct 'Event's based on 'Frame's.
-eventifyPipe :: Pipe Frame Event IO ()
-eventifyPipe = do
-  (Frame _ _ _ _ typ mask pl) <- await
-  let pl' = maybe pl (flip maskPayload pl) mask
-  case typ of
-    TextFrame -> yield $ MessageEvent $ Message pl' False
-    BinaryFrame -> yield $ MessageEvent $ Message pl' True
-    CloseFrame -> yield $ CloseEvent ($ encodeFrame $ construct CloseFrame pl') -- Frame True False False False CloseFrame Nothing pl)
-    PingFrame -> yield $ PingEvent ($ encodeFrame $ construct PongFrame pl') -- Frame True False False False PongFrame Nothing pl)
-    _ -> return ()
-  eventifyPipe
+-- |Demultiplexes 'Frame's.
+demuxFrames :: Pipe Frame Frame IO ()
+demuxFrames = fix $ \next -> (await >>= awaitConts) >> next
   where
-    construct typ payload = Frame True False False False typ Nothing payload
-  
-sendClose :: (B.ByteString -> IO ()) -> IO ()
-sendClose = ($ encodeFrame closeFrame)
+    awaitConts f
+      | frameFin f = yield f
+      | otherwise = do
+        f2@(Frame fin _ _ _ typ2 _ _) <- await
+        when (typ2 /= ContinuationFrame) $ fail "expected continuation frame"
+        awaitConts $ f {
+          frameFin = fin,
+          frameMask = Nothing,
+          framePayload = frameUnmaskedPayload f <> frameUnmaskedPayload f2
+        }
+        
+-- |Responds to frames, closing @hdl@ on a 'CloseFrame', sending a
+-- 'PongFrame' on a 'PingFrame', ignoring 'PongFrame's, and
+-- yielding messages on 'TextFrame's and 'BinaryFrame's.
+evalFrames :: Handle -> Pipe Frame Message IO ()
+evalFrames hdl = fix $ \next -> do
+  f <- await
+  case frameType f of
+    TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> next
+    BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> next
+    CloseFrame  -> lift $ closeWebsocket hdl
+    PingFrame   -> do
+      lift $ B.hPut hdl $ encodeFrame $ unmask f { frameType = PongFrame }
+      next
+    PongFrame   -> return () -- ignore pong frames
+
+-- |Closes a websocket given a handle.
+closeWebsocket :: Handle -> IO ()
+closeWebsocket hdl = do
+  eof <- hIsEOF hdl
+  unless eof $ (B.hPut hdl $ encodeFrame closeFrame) >> hClose hdl
+  where closeFrame = Frame True False False False CloseFrame Nothing ""
   
 encodeFrame :: Frame -> B.ByteString
 encodeFrame = BL.toStrict . runPut . put
 
-closeFrame :: Frame
-closeFrame = Frame True False False False CloseFrame Nothing ""
-
--- TODO chunking via continuation frames
+-- TODO: chunking via continuation frames
 encodeMessage :: Message -> B.ByteString
 encodeMessage (Message p True) = encodeFrame $ Frame True False False False BinaryFrame Nothing p
 encodeMessage (Message p False) = encodeFrame $ Frame True False False False TextFrame Nothing p

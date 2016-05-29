@@ -19,7 +19,8 @@ module CrossCourse.WebSocket.Frame
 (
   Frame(..),
   FrameType(..),
-  maskPayload
+  frameUnmaskedPayload,
+  unmask
 )
 where
 
@@ -34,18 +35,26 @@ import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 
--- TODO: mask field: Maybe Word32
-
 -- |A WebSockets frame.
 data Frame = Frame {
-  frameFin :: !Bool,
-  frameRsv1 :: !Bool,
-  frameRsv2 :: !Bool,
-  frameRsv3 :: !Bool,
-  frameType :: !FrameType,
-  frameMask :: !(Maybe B.ByteString),
+  frameFin     :: !Bool,
+  frameRsv1    :: !Bool,
+  frameRsv2    :: !Bool,
+  frameRsv3    :: !Bool,
+  frameType    :: !FrameType,
+  frameMask    :: !(Maybe B.ByteString),
   framePayload :: !BL.ByteString
 } deriving (Eq,Show)
+
+unmask :: Frame -> Frame
+unmask f = f { frameMask = Nothing, framePayload = frameUnmaskedPayload f}
+
+frameUnmaskedPayload :: Frame -> BL.ByteString
+frameUnmaskedPayload (Frame _ _ _ _ _ mask pl) = maybe pl (flip maskPayload pl) mask
+  where
+    maskPayload mask = snd . BL.mapAccumL f 0
+      where f !i !c = ((i + 1) `mod` (B.length mask),
+                       (B.index mask i) `xor` c)
 
 -- |The type of WebSockets frame.
 data FrameType
@@ -119,11 +128,3 @@ instance Binary Frame where
           | plen < 126     = (fromIntegral plen, return ())
           | plen < 0x10000 = (126, putWord16be $ fromIntegral plen)
           | otherwise      = (127, putWord64be $ fromIntegral plen)
-          
-maskPayload :: B.ByteString -> BL.ByteString -> BL.ByteString
-maskPayload mask = snd . BL.mapAccumL f 0
-  where
-    len     = B.length mask
-    f !i !c = (i', m `xor` c)
-      where i' = (i + 1) `mod` len
-            m  = mask `B.index` i

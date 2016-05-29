@@ -16,8 +16,11 @@ import Network.Socket
 
 import Data.List
 import Data.Word
+import Data.UUID
 import Data.UUID.V4
 import qualified Data.ByteString as B
+
+import Control.Monad
 
 import Data.Binary
 import Data.Binary.Get
@@ -27,8 +30,8 @@ import qualified Data.HashTable.IO as H
   
 {-
 TODO
-- finish designing "crosscourse" protocol
-  - authentication
+- rewrite the SocketTable to use Handles
+- finish designing/implementing "crosscourse" protocol
 - maybe message persistence (Postgres?,Web hook?)
 - push notifications
 -}
@@ -47,10 +50,10 @@ logic :: SocketTable -> ChatTable -> Logic
 logic sockets chats auth = deserialize >-> logic' auth chats >-> serialize sockets
 
 -- |Deserialize incoming messages into 'Incoming's.
-deserialize :: Pipe (Socket,Message) (Socket,Incoming) IO ()
+deserialize :: Pipe (a,Message) (a,Incoming) IO ()
 deserialize = do
-  Message msg isBinary <- await
-  when isBinary $ yield $ runGet readIncoming msg
+  (v,Message msg isBinary) <- await
+  when isBinary $ yield (v,runGet readIncoming msg) -- TODO: handle failure to parse messages
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
 serialize :: SocketTable -> Pipe (UUID,Outgoing) (Socket,Message) IO ()
@@ -61,7 +64,7 @@ serialize sockets = do
     return ()
     -- TODO: insert into socktable
     
-  sock <- lift $ H.lookup sockets uuid
+  sockmv <- lift $ H.lookup sockets uuid
   
   when (outgoing == ODeAuthSuccess) $ do
     lift $ H.delete sockets uuid
@@ -75,6 +78,7 @@ logic' authmv chats = do
   (sock,msg) <- await
   f sock authv msg
   where
+    mapMChat cuuid f = H.lookup chats cuuid >>= mapM_ f
     f s Nothing (IAuthenticate user) = do
       lift $ swapMVar authmv user
       yield (user,OAuthSuccess)
@@ -83,16 +87,15 @@ logic' authmv chats = do
       | otherwise = yield (user,OError alreadyAuthedError)
     f _ (Just auth) IDeAuthenticate = yield (auth,ODeAuthSuccess)
     f _ (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
-    f _ (Just auth) (IStopTyping chat) = mapMChat c $ yield . (,OStopTyping auth c)
+    f _ (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)
     f _ (Just auth) (IMessage c k d) = mapMChat c $ yield . (,OMessage auth c k d)
     f _ (Just auth) (ICreateChat users) = do
       let users' = nub $ auth:users
       cuuid <- lift $ nextRandom
       lift $ H.insert chats cuuid users'
-      mapM_ (\u -> yield (u,OChatInclusion cuuid),False) users'
+      mapM_ (\u -> yield (u,OChatInclusion cuuid)) users'
     f _ Nothing _ = return ()-- yield (???,OError unauthedError)
-    where
-      mapMChat cuuid f = H.lookup chats cuuid >>= mapM_ f
+    
   
 alreadyAuthedError :: Word8
 alreadyAuthedError = 100
@@ -125,18 +128,18 @@ readIncoming :: Get Incoming
 readIncoming = getWord8 >>= f
   where
     f 0 = IAuthenticate <$> get
-    f 1 = return IDeauthenticate
+    f 1 = return IDeAuthenticate
     f 2 = IStartTyping <$> get
     f 3 = IMessage <$> get <*> getWord8 <*> getByteString
     f 4 = ICreateChat <$> getList
     f _ = return IUnsupported
-    where
-      getList :: Binary a => Get [a]
-      getList = go =<< getWord8
-        where
-          go left
-            | left <= 0 = pure []
-            | otherwise = (:) <$> get <*> go (left-1) 
+    getList :: Binary a => Get [a]
+    getList = go =<< getWord8
+      where
+        go left
+          | left <= 0 = pure []
+          | otherwise = (:) <$> get <*> go (left-1)
+      
 
 data Outgoing
   = OAuthSuccess
