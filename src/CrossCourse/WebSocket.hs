@@ -100,18 +100,19 @@ evalFrames hdl = fix $ \next -> do
   case frameType f of
     TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> next
     BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> next
-    CloseFrame  -> lift $ closeWebsocket hdl
+    CloseFrame  -> lift $ closeWebsocket hdl (frameUnmaskedPayload f)
     PingFrame   -> do
       lift $ B.hPut hdl $ encodeFrame $ unmask f { frameType = PongFrame }
       next
     PongFrame   -> return () -- ignore pong frames
 
+-- TODO: close a websocket given a failure reason and a message.
 -- |Closes a websocket given a handle.
-closeWebsocket :: Handle -> IO ()
-closeWebsocket hdl = do
+closeWebsocket :: Handle -> BL.ByteString -> IO ()
+closeWebsocket hdl reason = do
   eof <- hIsEOF hdl
   unless eof $ (B.hPut hdl $ encodeFrame closeFrame) >> hClose hdl
-  where closeFrame = Frame True False False False CloseFrame Nothing ""
+  where closeFrame = Frame True False False False CloseFrame Nothing reason
   
 encodeFrame :: Frame -> B.ByteString
 encodeFrame = BL.toStrict . runPut . put

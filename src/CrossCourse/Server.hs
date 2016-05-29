@@ -35,7 +35,7 @@ TODO:
 - supply socket/handle to logic
 -}
 
--- |Start the 'Message' server.
+-- |Start a given websocket server given a port and 'Logic'.
 startServer :: Int  -- ^ port to run server on
             -> Logic -- ^ server logic based on a pipe
             -> IO ()
@@ -48,8 +48,8 @@ startServer port logic = withSocketsDo $ do
         hdl <- socketToHandle sock ReadWriteMode
         forkIO $ shakeHand hdl $ do
           auth <- newMVar Nothing
-          runEffect $ websocket hdl >-> logic auth >-> messageLogic
-          closeWebsocket hdl
+          runEffect $ websocket hdl >-> logic auth hdl >-> messageLogic
+          closeWebsocket hdl ""
       else close sock
   where
     messageLogic = do

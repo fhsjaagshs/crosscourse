@@ -13,6 +13,7 @@ import Pipes
 import Control.Concurrent hiding (yield)
 
 import Network.Socket
+import System.IO
 
 import Data.List
 import Data.Word
@@ -30,71 +31,74 @@ import qualified Data.HashTable.IO as H
   
 {-
 TODO
-- rewrite the SocketTable to use Handles
-- finish designing/implementing "crosscourse" protocol
-- maybe message persistence (Postgres?,Web hook?)
+- Errors should always close the connection
+    * prevents uncooperative clients from doing Bad Things™
+- Clean up implementation and make it compile/work
 - push notifications
+
+Maybe:
+- persistence (Postgres?,Web hook?)
+  * chat grouping
+  * messages
+- clustering via frame forwarding
+  * @type Logic = Auth -> Handle -> Pipe Message (Maybe (Handle,Message)) IO ()@
+    * @Just (hdl,msg)@ means yes, this node can fulfill
+    * @Nothing@ means this node cannot
+
 -}
 
-type Logic = Auth -> Pipe (Socket,Message) (Socket,Message) IO ()
+type Logic = Auth -> Handle -> Pipe Message (Handle,Message) IO ()
 type Auth = MVar (Maybe UUID)
 
-type SocketTable = H.CuckooHashTable UUID (MVar Socket)
+type HandleTable = H.CuckooHashTable UUID Handle
 type ChatTable = H.CuckooHashTable UUID [UUID]
-type ReverseSocketTable = H.CuckooHashTable Socket UUID
 
 mkLogic :: IO Logic
 mkLogic = logic <$> H.new <*> H.new
 
-logic :: SocketTable -> ChatTable -> Logic
-logic sockets chats auth = deserialize >-> logic' auth chats >-> serialize sockets
+logic :: HandleTable -> ChatTable -> Logic
+logic hdls chats auth hdl = deserialize >-> logic' auth hdls chats >-> serialize hdls
 
 -- |Deserialize incoming messages into 'Incoming's.
-deserialize :: Pipe (a,Message) (a,Incoming) IO ()
+deserialize :: Pipe Message Incoming IO ()
 deserialize = do
-  (v,Message msg isBinary) <- await
-  when isBinary $ yield (v,runGet readIncoming msg) -- TODO: handle failure to parse messages
+  Message msg isBinary <- await
+  when isBinary $ yield $ runGet readIncoming msg -- TODO: handle failure to parse 'Incoming's
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
-serialize :: SocketTable -> Pipe (UUID,Outgoing) (Socket,Message) IO ()
-serialize sockets = do
+serialize :: HandleTable -> Pipe (UUID,Outgoing) (Handle,Message) IO ()
+serialize hdls = do
   (uuid,outgoing) <- await
-  
-  when (outgoing == OAuthSuccess) $ do
-    return ()
-    -- TODO: insert into socktable
-    
-  sockmv <- lift $ H.lookup sockets uuid
-  
-  when (outgoing == ODeAuthSuccess) $ do
-    lift $ H.delete sockets uuid
-    -- TODO: close socket?
-  
-  yield (sock,Message (runPut $ serializeOutgoing outgoing) True)
+  let msg = Message (runPut $ serializeOutgoing outgoing) True
+
+  -- FIXME: remove handles from this when closing the connection
+  dest <- lift $ H.lookup hdls uuid
+  yield (dest,msg)
         
-logic' :: Auth -> ChatTable -> Pipe (Socket,Incoming) (UUID,Outgoing) IO ()
-logic' authmv chats = do
+logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
+logic' hdl authmv hdls chats = do
   authv <- lift $ readMVar authmv
-  (sock,msg) <- await
+  msg <- await
   f sock authv msg
   where
     mapMChat cuuid f = H.lookup chats cuuid >>= mapM_ f
-    f s Nothing (IAuthenticate user) = do
-      lift $ swapMVar authmv user
+    f Nothing (IAuthenticate user) = do
+      lift $ do
+        swapMVar authmv user
+        H.insert hdls user hdl
       yield (user,OAuthSuccess)
-    f _ (Just auth) (IAuthenticate user)
+    f (Just auth) (IAuthenticate user)
       | auth == user = yield (user,OAuthSuccess)
       | otherwise = yield (user,OError alreadyAuthedError)
-    f _ (Just auth) IDeAuthenticate = yield (auth,ODeAuthSuccess)
-    f _ (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
-    f _ (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)
-    f _ (Just auth) (IMessage c k d) = mapMChat c $ yield . (,OMessage auth c k d)
-    f _ (Just auth) (ICreateChat users) = do
+    f (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
+    f (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)
+    f (Just auth) (IMessage c k d) = mapMChat c $ yield . (,OMessage auth c k d)
+    f (Just auth) (ICreateChat users) = do
       let users' = nub $ auth:users
       cuuid <- lift $ nextRandom
       lift $ H.insert chats cuuid users'
       mapM_ (\u -> yield (u,OChatInclusion cuuid)) users'
-    f _ Nothing _ = return ()-- yield (???,OError unauthedError)
+    f Nothing _ = return ()-- FIXME: close the connection!
     
   
 alreadyAuthedError :: Word8
@@ -107,7 +111,6 @@ data Incoming
   = IAuthenticate {
       iAuthUUID :: UUID
     }
-  | IDeAuthenticate
   | IStartTyping {
       iStartTypingChat :: UUID
     }
@@ -122,17 +125,16 @@ data Incoming
   | ICreateChat {
       iCreateChatUsers :: [UUID]
     }
-  | IUnsupported
 
 readIncoming :: Get Incoming
 readIncoming = getWord8 >>= f
   where
     f 0 = IAuthenticate <$> get
-    f 1 = return IDeAuthenticate
-    f 2 = IStartTyping <$> get
+    f 1 = IStartTyping <$> get
+    f 2 = IStopTyping <$> get
     f 3 = IMessage <$> get <*> getWord8 <*> getByteString
     f 4 = ICreateChat <$> getList
-    f _ = return IUnsupported
+    f _ = fail "unsupported message"
     getList :: Binary a => Get [a]
     getList = go =<< getWord8
       where
@@ -140,10 +142,8 @@ readIncoming = getWord8 >>= f
           | left <= 0 = pure []
           | otherwise = (:) <$> get <*> go (left-1)
       
-
 data Outgoing
   = OAuthSuccess
-  | ODeAuthSuccess
   | OStartTyping {
       oStartTypingUser :: UUID,
       oStartTypingChat :: UUID
@@ -161,15 +161,10 @@ data Outgoing
   | OChatInclusion {
       oChatInclusionChat :: UUID
     }
-  | OError {
-      oErrorCode :: Word8
-    }
-    
+
 serializeOutgoing :: Outgoing -> Put
 serializeOutgoing OAuthSuccess = return ()
-serializeOutgoing ODeAuthSuccess = return ()
 serializeOutgoing (OStartTyping user chat) = return ()
 serializeOutgoing (OStopTyping user chat) = return ()
 serializeOutgoing (OMessage sender chat kind data_) = return ()
 serializeOutgoing (OChatInclusion chat) = return ()
-serializeOutgoing (OError code) = return ()
