@@ -59,42 +59,38 @@ mkLogic :: IO Logic
 mkLogic = logic <$> H.new <*> H.new
 
 logic :: HandleTable -> ChatTable -> Logic
-logic hdls chats = \auth hdl -> deserialize >-> logic' hdl auth hdls chats >-> serialize hdls
+logic hdls chats = \auth hdl -> deserialize hdl >-> logic' hdl auth hdls chats >-> serialize hdls
 
 -- |Deserialize incoming messages into 'Incoming's.
-deserialize :: Pipe Message Incoming IO ()
-deserialize = do
-  v@(Message msg isBinary) <- await
-  lift $ print v
-  when isBinary $ yield $ runGet readIncoming msg -- TODO: handle failure to parse 'Incoming's
+deserialize :: Handle -> Pipe Message Incoming IO ()
+deserialize hdl = do
+  Message msg isBinary <- await
+  if not isBinary
+    then lift $ closeWebsocketCode hdl invalidMessageError "utf8 message received"
+    else case runGetOrFail getIncoming msg of
+      Left (_,_,err) -> lift $ closeWebsocketCode hdl invalidMessageError err
+      Right (_,_,v) -> yield v
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
 serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) IO ()
 serialize hdls = do
   (uuid,outgoing) <- await
-  let msg = Message (runPut $ serializeOutgoing outgoing) True
+  let msg = Message (runPut $ putOutgoing outgoing) True
 
   -- FIXME: remove handles from this when closing the connection
   dest <- lift $ H.lookup hdls uuid
   maybe (yield Nothing) (yield . Just . (,msg)) dest
         
 logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
-logic' hdl authmv hdls chats = do
-  authv <- lift $ readMVar authmv
-  msg <- await
-  lift $ print msg
-  f authv msg
+logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
   where
-    mapMChat cuuid f = (lift $ H.lookup chats cuuid) >>= mapM_ f . fromMaybe []
-    f Nothing (IAuthenticate user) = do
+    mapMChat cuuid g = (lift $ H.lookup chats cuuid) >>= mapM_ g . fromMaybe []
+    f _ (IAuthenticate user) = do
       lift $ do
-        print user
-        swapMVar authmv (Just user)
+        old <- swapMVar authmv (Just user)
+        maybe (pure ()) (H.delete hdls) old
         H.insert hdls user hdl
       yield (user,OAuthSuccess)
-    f (Just auth) (IAuthenticate user)
-      | auth == user = yield (user,OAuthSuccess)
-      | otherwise = f Nothing (IAuthenticate user)
     f (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
     f (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)
     f (Just auth) (IMessage c k d) = mapMChat c $ yield . (,OMessage auth c k d)
@@ -102,14 +98,14 @@ logic' hdl authmv hdls chats = do
       let users' = nub $ auth:users
       cuuid <- lift $ nextRandom
       lift $ H.insert chats cuuid users'
-      mapM_ (\u -> yield (u,OChatInclusion cuuid)) users'
-    f Nothing _ = lift $ closeWebsocketCode
-                    hdl
-                    unauthedError
-                    "attempted to do operation requiring authentication whilst unauthenticated."
+      mapM_ (yield . (,OChatInclusion cuuid)) users'
+    f Nothing _ = lift $ closeWebsocketCode hdl unauthedError "not authenticated"
     
 unauthedError :: Word16
-unauthedError = 100
+unauthedError = 101
+
+invalidMessageError :: Word16
+invalidMessageError = 100
 
 data Incoming
   = IAuthenticate {
@@ -131,8 +127,8 @@ data Incoming
     }
   deriving (Eq,Show)
   
-readIncoming :: Get Incoming
-readIncoming = getWord8 >>= f
+getIncoming :: Get Incoming
+getIncoming = getWord8 >>= f
   where
     f 0 = IAuthenticate <$> get
     f 1 = IStartTyping <$> get
@@ -168,10 +164,9 @@ data Outgoing
     }
   deriving (Eq,Show)
 
--- TODO: implement
-serializeOutgoing :: Outgoing -> Put
-serializeOutgoing OAuthSuccess = putByteString "auth success"
-serializeOutgoing (OStartTyping user chat) = putByteString "start typing"
-serializeOutgoing (OStopTyping user chat) = putByteString "stop typing"
-serializeOutgoing (OMessage sender chat kind data_) = putByteString $ "message: " <> data_
-serializeOutgoing (OChatInclusion chat) = putByteString $ "chat inclusion"
+putOutgoing :: Outgoing -> Put
+putOutgoing OAuthSuccess = putWord8 0
+putOutgoing (OStartTyping u c) = putWord8 1 >> put u >> put c
+putOutgoing (OStopTyping u c) = putWord8 2 >> put u >> put c
+putOutgoing (OMessage s c k d) = putWord8 3 >> put s >> put c >> put k >> put d
+putOutgoing (OChatInclusion c) = putWord8 4 >> put c
