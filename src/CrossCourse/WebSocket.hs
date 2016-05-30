@@ -19,15 +19,12 @@ module CrossCourse.WebSocket
 (
   Message(..),
   websocket,
-  closeWebsocket
+  closeWebsocket,
+  closeWebsocketCode
 )
 where
 
-{-
-TODO
-- chunk larger text/binary frames, see 'encodeMessage'
--}
-
+import CrossCourse.Binary
 import CrossCourse.WebSocket.Frame
 
 import Pipes
@@ -43,38 +40,40 @@ import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as BLC
+import qualified Data.Text.Lazy as TL
+import qualified Data.Text.Lazy.Encoding as TL
   
 data Message = Message {
   messagePayload :: !BL.ByteString,
   messageIsBinary :: !Bool
 } deriving (Eq,Show)
+
+instance Binary Message where
+  put (Message p False) = put $ Frame True False False False TextFrame Nothing p
+  put (Message p True) = put $ Frame True False False False BinaryFrame Nothing p
+  get = fail "cannot read a message from binary"
   
 -- |WebSocket logic. Responds to incoming frames, closing @hdl@ if necessary.
 -- Yields 'Message's to be used in a pipeline.
 websocket :: Handle -> Producer Message IO ()
 websocket hdl = fromHandle' hdl >-> parseFrames >-> demuxFrames >-> evalFrames hdl
-  where
-    fromHandle' h = fix $ \next -> do
-      eof <- lift $ hIsEOF h
-      unless eof $ do
-        (liftIO $ B.hGet h 4092) >>= yield
-        next
 
--- |Parses a stream of bytes as @Frame@s.
+-- |Creates a producer from a 'Handle'.
+fromHandle' :: Handle -> Producer B.ByteString IO ()
+fromHandle' h = fix $ \next -> do
+  eof <- lift $ hIsEOF h
+  unless eof $ do
+    (liftIO $ B.hGetNonBlocking h 4092) >>= yield
+    next
+   
+-- |Parses a stream of bytes as @Frame@s.       
 parseFrames :: Pipe B.ByteString Frame IO ()
 parseFrames = loop ""
   where
-    parse :: B.ByteString -> [Frame] -> Either String (B.ByteString,[Frame])
-    parse bs accum = d $ runGetIncremental get
-      where d (Partial f) = d $ f $ Just bs
-            d (Done remaining _ result) = parse remaining (accum ++ [result])
-            d (Fail "" _ _) = Right (bs,accum) -- consumed @bs@, not enough input to finish
-            d (Fail _ _ err) = Left err -- encountered an error parsing
-    loop = fix $ \next bs -> await >>= either l (r next) . flip parse [] . mappend bs
-      where
-        r next ("",frames) = mapM_ yield frames
-        r next (leftover,frames) = mapM_ yield frames >> next leftover
-        l = yield . Frame True False False False CloseFrame Nothing . mappend (runPut $ putWord16be 1) . BLC.pack
+    mkClose = Frame True False False False CloseFrame Nothing
+    l = yield . mkClose . mappend (runPut $ putWord16be 1) . BLC.pack
+    r next (remaining,frame) = yield frame >> next remaining
+    loop = fix $ \next leftover -> runGetWith get leftover await >>= either l (r next)
 
 -- |Demultiplexes 'Frame's.
 demuxFrames :: Pipe Frame Frame IO ()
@@ -102,7 +101,7 @@ evalFrames hdl = fix $ \next -> do
     BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> next
     CloseFrame  -> lift $ closeWebsocket hdl (frameUnmaskedPayload f)
     PingFrame   -> do
-      lift $ B.hPut hdl $ encodeFrame $ unmask f { frameType = PongFrame }
+      lift $ B.hPut hdl $ encode' $ unmask f { frameType = PongFrame }
       next
     PongFrame   -> return () -- ignore pong frames
 
@@ -111,13 +110,9 @@ evalFrames hdl = fix $ \next -> do
 closeWebsocket :: Handle -> BL.ByteString -> IO ()
 closeWebsocket hdl reason = do
   eof <- hIsEOF hdl
-  unless eof $ (B.hPut hdl $ encodeFrame closeFrame) >> hClose hdl
+  unless eof $ (B.hPut hdl $ encode' closeFrame) >> hClose hdl
   where closeFrame = Frame True False False False CloseFrame Nothing reason
   
-encodeFrame :: Frame -> B.ByteString
-encodeFrame = BL.toStrict . runPut . put
-
--- TODO: chunking via continuation frames
-encodeMessage :: Message -> B.ByteString
-encodeMessage (Message p True) = encodeFrame $ Frame True False False False BinaryFrame Nothing p
-encodeMessage (Message p False) = encodeFrame $ Frame True False False False TextFrame Nothing p
+closeWebsocketCode :: Handle -> Word16 -> String -> IO ()
+closeWebsocketCode hdl code reason = closeWebsocket hdl $ encode code <> utf8Reason
+  where utf8Reason = TL.encodeUtf8 $ TL.pack reason

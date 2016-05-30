@@ -8,7 +8,9 @@ where
 import CrossCourse.WebSocket
 import CrossCourse.WebSocket.HTTP
 import CrossCourse.Logic
+import CrossCourse.Binary
 
+import Network.Socket
 import Data.Streaming.Network (bindPortTCP)
 
 import System.IO
@@ -31,8 +33,7 @@ import Control.Concurrent hiding (yield)
 
 {-
 TODO:
-- signal/exit handlers: close all sockets
-- supply socket/handle to logic
+- signal/exit handlers: close all websockets
 -}
 
 -- |Start a given websocket server given a port and 'Logic'.
@@ -46,12 +47,13 @@ startServer port logic = withSocketsDo $ do
     if (isSupportedSockAddr saddr)
       then do
         hdl <- socketToHandle sock ReadWriteMode
-        forkIO $ shakeHand hdl $ do
+        void $ forkIO $ wsHandshake hdl $ do
           auth <- newMVar Nothing
           runEffect $ websocket hdl >-> logic auth hdl >-> messageLogic
           closeWebsocket hdl ""
       else close sock
   where
-    messageLogic = do
-      (dest,msg) <- await
-      lift $ hPut dest $ encodeMessage msg
+    messageLogic = await >>= f
+      where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
+            f _ = return ()
+      

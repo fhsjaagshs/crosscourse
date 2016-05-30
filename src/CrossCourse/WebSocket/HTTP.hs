@@ -90,15 +90,16 @@ wsHandshake hdl success = parseWith chunk request "" >>= maybe badRequest f . ma
       f (Request "GET" _ "1.1",hdrs) = do
         let hdrs' = map (\(Header k vs) -> (k,mconcat vs)) hdrs
         flushBody hdrs'
+        -- TODO: header case-insensitivity
         maybe badRequest ((>> success) . B.hPut hdl . mkHandshakeResponse) $ do
           ensure "Upgrade"     $ lookup "Connection"             hdrs'
           ensure "websocket"   $ lookup "Upgrade"                hdrs'
           ensure "13"          $ lookup "Sec-WebSocket-Version"  hdrs'
           ensure "crosscourse" $ lookup "Sec-WebSocket-Protocol" hdrs'
           lookup "Sec-WebSocket-Key" hdrs'
-      f _ = badRequest
-      chunk = B.hGet hdl 4092
-      flushBody hdrs = maybe (pure ()) (void . B.hGet hdl) $ do
+      f _ = putStrLn "badreq" >> badRequest
+      chunk = B.hGetSome hdl 4092
+      flushBody hdrs = maybe (pure ()) (void . B.hGetSome hdl) $ do
         clenh <- lookup "Content-Length" hdrs
         readMaybe $ BC.unpack clenh
       badRequest = B.hPut hdl $ mkBadRequestResponse "invalid websocket handshake."
