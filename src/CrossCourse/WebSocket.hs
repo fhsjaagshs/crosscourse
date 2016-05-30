@@ -105,7 +105,6 @@ evalFrames hdl = fix $ \next -> do
       next
     PongFrame   -> return () -- ignore pong frames
 
--- TODO: close a websocket given a failure reason and a message.
 -- |Closes a websocket given a handle.
 closeWebsocket :: Handle -> BL.ByteString -> IO ()
 closeWebsocket hdl reason = do

@@ -33,11 +33,10 @@ import qualified Data.HashTable.IO as H
   
 {-
 TODO
-- Errors should always close the connection
-    * prevents uncooperative clients from doing Bad Things™
-- Clean up implementation and make it compile/work
+- de-authenticate when closing ** server-wide
+- use a monad to handle auth, handletables, and the current handle.
+  - could be used to fail and provide a reason, to be used by CrossCourse.Server
 - push notifications
-- implement 'Outgoing' serialization
 
 Maybe:
 - persistence (Postgres?,Web hook?)
@@ -61,6 +60,13 @@ mkLogic = logic <$> H.new <*> H.new
 logic :: HandleTable -> ChatTable -> Logic
 logic hdls chats = \auth hdl -> deserialize hdl >-> logic' hdl auth hdls chats >-> serialize hdls
 
+-- |authentication
+auth :: HandleTable -> Auth -> Maybe (UUID,Handle) -> IO ()
+auth hdls auth v = do
+  old <- swapMVar auth (fst <$> v)
+  maybe (pure ()) (H.delete hdls) old
+  maybe (pure ()) (uncurry (H.insert hdls)) v
+
 -- |Deserialize incoming messages into 'Incoming's.
 deserialize :: Handle -> Pipe Message Incoming IO ()
 deserialize hdl = do
@@ -75,21 +81,16 @@ deserialize hdl = do
 serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) IO ()
 serialize hdls = do
   (uuid,outgoing) <- await
+  dest            <- lift $ H.lookup hdls uuid
   let msg = Message (runPut $ putOutgoing outgoing) True
-
-  -- FIXME: remove handles from this when closing the connection
-  dest <- lift $ H.lookup hdls uuid
   maybe (yield Nothing) (yield . Just . (,msg)) dest
-        
+
 logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
 logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
   where
     mapMChat cuuid g = (lift $ H.lookup chats cuuid) >>= mapM_ g . fromMaybe []
     f _ (IAuthenticate user) = do
-      lift $ do
-        old <- swapMVar authmv (Just user)
-        maybe (pure ()) (H.delete hdls) old
-        H.insert hdls user hdl
+      lift $ auth hdls authmv (Just (user,hdl))
       yield (user,OAuthSuccess)
     f (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
     f (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)

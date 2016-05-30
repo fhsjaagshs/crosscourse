@@ -34,6 +34,9 @@ import Control.Concurrent hiding (yield)
 {-
 TODO:
 - signal/exit handlers: close all websockets
+  - de-auth: closing the connection should be as simple as
+  - exiting the pipe loop
+- clustering in 'messageLogic' (forward message to cluster)
 -}
 
 -- |Start a given websocket server given a port and 'Logic'.
@@ -52,8 +55,9 @@ startServer port logic = withSocketsDo $ do
           runEffect $ websocket hdl >-> logic auth hdl >-> messageLogic
           closeWebsocket hdl ""
       else close sock
-  where
-    messageLogic = await >>= f
-      where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
-            f _ = return ()
+
+messageLogic :: Consumer (Maybe (Handle,Message)) IO ()
+messageLogic = await >>= f
+  where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
+        f _ = return ()
       
