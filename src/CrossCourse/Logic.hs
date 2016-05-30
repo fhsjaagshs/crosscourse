@@ -13,7 +13,6 @@ import CrossCourse.Binary
 import Pipes
 import Control.Concurrent hiding (yield)
 
--- import Network.Socket
 import System.IO
 
 import Data.Maybe
@@ -21,10 +20,7 @@ import Data.List
 import Data.Word
 import Data.UUID
 import Data.UUID.V4
--- import Data.Monoid
 import qualified Data.ByteString as B
-
--- import Control.Monad
 
 import Data.Binary
 import Data.Binary.Get
@@ -34,6 +30,7 @@ import qualified Data.HashTable.IO as H
   
 {-
 TODO
+- message read and delivered notifications
 - de-authenticate when closing ** server-wide
 - use a monad to handle auth, handletables, and the current handle.
   - could be used to fail and provide a reason, to be used by CrossCourse.Server
@@ -95,13 +92,13 @@ sendMessage = await >>= f
 logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
 logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
   where
-    mapMChat cuuid g = (lift $ H.lookup chats cuuid) >>= mapM_ g . fromMaybe []
+    mapMChat cuuid u g = (lift $ H.lookup chats cuuid) >>= mapM_ g . delete u . fromMaybe []
     f _ (IAuthenticate user) = do
       lift $ auth hdls authmv (Just (user,hdl))
       yield (user,OAuthSuccess user)
-    f (Just a) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping a c)
-    f (Just a) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping a c)
-    f (Just a) (IMessage c k d) = mapMChat c $ yield . (,OMessage a c k d)
+    f (Just a) (IStartTyping c) = mapMChat c a $ yield . (,OStartTyping a c)
+    f (Just a) (IStopTyping c) = mapMChat c a $ yield . (,OStopTyping a c)
+    f (Just a) (IMessage c k d) = mapMChat c a $ yield . (,OMessage a c k d)
     f (Just a) (ICreateChat us) = do
       let us' = nub $ a:us
       cuuid <- lift $ nextRandom
@@ -136,11 +133,11 @@ getIncoming = getWord8 >>= f
     f 0 = IAuthenticate <$> get
     f 1 = IStartTyping <$> get
     f 2 = IStopTyping <$> get
-    f 3 = IMessage <$> get <*> getWord8 <*> (getWord64be >>= getByteString . fromIntegral)
+    f 3 = IMessage <$> get <*> get <*> (getWord64be >>= getByteString . fromIntegral)
     f 4 = ICreateChat <$> getList
     f _ = fail "unsupported message"
     getList :: Binary a => Get [a]
-    getList = go =<< getWord8
+    getList = go =<< getWord64be
       where
         go left
           | left <= 0 = pure []
