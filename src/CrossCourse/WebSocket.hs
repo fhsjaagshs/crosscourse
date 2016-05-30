@@ -28,14 +28,14 @@ import CrossCourse.Binary
 import CrossCourse.WebSocket.Frame
 
 import Pipes
-import qualified Pipes.Prelude as P
+-- import qualified Pipes.Prelude as P
 import Control.Monad
 import Control.Monad.Fix
 import System.IO
 
 import Data.Monoid
 import Data.Binary
-import Data.Binary.Get
+-- import Data.Binary.Get
 import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -60,11 +60,11 @@ websocket hdl = fromHandle' hdl >-> parseFrames >-> demuxFrames >-> evalFrames h
 
 -- |Creates a producer from a 'Handle'.
 fromHandle' :: Handle -> Producer B.ByteString IO ()
-fromHandle' h = fix $ \next -> do
+fromHandle' h = fix $ \fx -> do
   eof <- lift $ hIsEOF h
   unless eof $ do
     (liftIO $ B.hGetNonBlocking h 4092) >>= yield
-    next
+    fx
    
 -- |Parses a stream of bytes as @Frame@s.       
 parseFrames :: Pipe B.ByteString Frame IO ()
@@ -72,12 +72,12 @@ parseFrames = loop ""
   where
     mkClose = Frame True False False False CloseFrame Nothing
     l = yield . mkClose . mappend (runPut $ putWord16be 1) . BLC.pack
-    r next (remaining,frame) = yield frame >> next remaining
-    loop = fix $ \next leftover -> runGetWith get leftover await >>= either l (r next)
+    r fx (remaining,frame) = yield frame >> fx remaining
+    loop = fix $ \fx leftover -> runGetWith get leftover await >>= either l (r fx)
 
 -- |Demultiplexes 'Frame's.
 demuxFrames :: Pipe Frame Frame IO ()
-demuxFrames = fix $ \next -> (await >>= awaitConts) >> next
+demuxFrames = fix $ \fx -> (await >>= awaitConts) >> fx
   where
     awaitConts f
       | frameFin f = yield f
@@ -90,20 +90,22 @@ demuxFrames = fix $ \next -> (await >>= awaitConts) >> next
           framePayload = frameUnmaskedPayload f <> frameUnmaskedPayload f2
         }
         
--- |Responds to frames, closing @hdl@ on a 'CloseFrame', sending a
--- 'PongFrame' on a 'PingFrame', ignoring 'PongFrame's, and
--- yielding messages on 'TextFrame's and 'BinaryFrame's.
+-- |Responds to incoming frames:
+-- * 'yield's 'Message's from 'TextFrame's and 'BinaryFrame's
+-- * Closes the connection on 'CloseFrame's
+-- * Sends 'PongFrame's on 'PingFrame's
+-- * Ignores all other frames
 evalFrames :: Handle -> Pipe Frame Message IO ()
-evalFrames hdl = fix $ \next -> do
+evalFrames hdl = fix $ \fx -> do
   f <- await
   case frameType f of
-    TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> next
-    BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> next
+    TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> fx
+    BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> fx
     CloseFrame  -> lift $ closeWebsocket hdl (frameUnmaskedPayload f)
     PingFrame   -> do
       lift $ B.hPut hdl $ encode' $ unmask f { frameType = PongFrame }
-      next
-    PongFrame   -> return () -- ignore pong frames
+      fx
+    _   -> return ()
 
 -- |Closes a websocket given a handle.
 closeWebsocket :: Handle -> BL.ByteString -> IO ()

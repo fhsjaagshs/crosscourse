@@ -16,7 +16,8 @@ Implements basic HTTP functionality needed for running websockets.
 
 module CrossCourse.WebSocket.HTTP
 (
-  wsHandshake
+  wsHandshake,
+  splitPath
 )
 where
   
@@ -36,24 +37,25 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Binary
 import Data.Binary.Put
 import Data.Attoparsec.ByteString
-import qualified Crypto.Hash.SHA1 as SHA1
+import Crypto.Hash (Digest,SHA1,hash)
+import Data.ByteArray (convert)
 
 import Text.Read
 
 import System.IO
 
 -- |Split a path into path components
--- splitPath :: B.ByteString -> [B.ByteString]
--- splitPath = catMaybes . unfoldr splitter
---   where
---     splitter bs
---       | B.null bs = Nothing
---       | B.null t = Just (Nothing,d') -- started
---       | B.null d = Just (Just t,"")-- ended
---       | otherwise = Just (Just t,d')
---       where
---         (t,d) = B.break (== (c2w '/')) bs
---         d' = if B.null d then "" else B.tail d
+splitPath :: B.ByteString -> [B.ByteString]
+splitPath = catMaybes . unfoldr splitter
+  where
+    splitter bs
+      | B.null bs = Nothing
+      | B.null t = Just (Nothing,d') -- started
+      | B.null d = Just (Just t,"")-- ended
+      | otherwise = Just (Just t,d')
+      where
+        (t,d) = B.break (== (c2w '/')) bs
+        d' = if B.null d then "" else B.tail d
 
 putHeader :: B.ByteString -> B.ByteString -> Put
 putHeader k v = do
@@ -82,7 +84,8 @@ mkHandshakeResponse wskey = BL.toStrict $ runPut $ do
   putByteString "\r\n"
   where
     magicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    calculateAccept = B64.encode . SHA1.hash . flip mappend magicString
+    sha1hash = (convert :: Digest SHA1 -> B.ByteString) . hash
+    calculateAccept = B64.encode . sha1hash . flip mappend magicString
 
 wsHandshake :: Handle -> IO () -> IO ()
 wsHandshake hdl success = parseWith chunk request "" >>= maybe badRequest f . maybeResult

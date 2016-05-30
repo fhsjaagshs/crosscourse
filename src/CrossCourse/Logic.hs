@@ -8,11 +8,12 @@ module CrossCourse.Logic
 where
   
 import CrossCourse.WebSocket
+import CrossCourse.Binary
 
 import Pipes
 import Control.Concurrent hiding (yield)
 
-import Network.Socket
+-- import Network.Socket
 import System.IO
 
 import Data.Maybe
@@ -20,10 +21,10 @@ import Data.List
 import Data.Word
 import Data.UUID
 import Data.UUID.V4
-import Data.Monoid
+-- import Data.Monoid
 import qualified Data.ByteString as B
 
-import Control.Monad
+-- import Control.Monad
 
 import Data.Binary
 import Data.Binary.Get
@@ -46,9 +47,10 @@ Maybe:
   * @type Logic = Auth -> Handle -> Pipe Message (Maybe (Handle,Message)) IO ()@
     * @Just (hdl,msg)@ means yes, this node can fulfill
     * @Nothing@ means this node cannot
+- clustering in 'messageLogic' (forward message to cluster)
 -}
 
-type Logic = Auth -> Handle -> Pipe Message (Maybe (Handle,Message)) IO ()
+type Logic = Auth -> Handle -> Consumer Message IO ()
 type Auth = MVar (Maybe UUID)
 
 type HandleTable = H.CuckooHashTable UUID Handle
@@ -58,12 +60,12 @@ mkLogic :: IO Logic
 mkLogic = logic <$> H.new <*> H.new
 
 logic :: HandleTable -> ChatTable -> Logic
-logic hdls chats = \auth hdl -> deserialize hdl >-> logic' hdl auth hdls chats >-> serialize hdls
+logic hdls chats = \mv hdl -> deserialize hdl >-> logic' hdl mv hdls chats >-> serialize hdls >-> sendMessage
 
 -- |authentication
 auth :: HandleTable -> Auth -> Maybe (UUID,Handle) -> IO ()
-auth hdls auth v = do
-  old <- swapMVar auth (fst <$> v)
+auth hdls authmv v = do
+  old <- swapMVar authmv (fst <$> v)
   maybe (pure ()) (H.delete hdls) old
   maybe (pure ()) (uncurry (H.insert hdls)) v
 
@@ -84,6 +86,11 @@ serialize hdls = do
   dest            <- lift $ H.lookup hdls uuid
   let msg = Message (runPut $ putOutgoing outgoing) True
   maybe (yield Nothing) (yield . Just . (,msg)) dest
+  
+sendMessage :: Consumer (Maybe (Handle,Message)) IO ()
+sendMessage = await >>= f
+  where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
+        f _ = return ()
 
 logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
 logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
@@ -92,14 +99,14 @@ logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
     f _ (IAuthenticate user) = do
       lift $ auth hdls authmv (Just (user,hdl))
       yield (user,OAuthSuccess)
-    f (Just auth) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping auth c)
-    f (Just auth) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping auth c)
-    f (Just auth) (IMessage c k d) = mapMChat c $ yield . (,OMessage auth c k d)
-    f (Just auth) (ICreateChat users) = do
-      let users' = nub $ auth:users
+    f (Just a) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping a c)
+    f (Just a) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping a c)
+    f (Just a) (IMessage c k d) = mapMChat c $ yield . (,OMessage a c k d)
+    f (Just a) (ICreateChat us) = do
+      let us' = nub $ a:us
       cuuid <- lift $ nextRandom
-      lift $ H.insert chats cuuid users'
-      mapM_ (yield . (,OChatInclusion cuuid)) users'
+      lift $ H.insert chats cuuid us'
+      mapM_ (yield . (,OChatInclusion cuuid)) us'
     f Nothing _ = lift $ closeWebsocketCode hdl unauthedError "not authenticated"
     
 unauthedError :: Word16
@@ -109,23 +116,18 @@ invalidMessageError :: Word16
 invalidMessageError = 100
 
 data Incoming
-  = IAuthenticate {
-      iAuthUUID :: UUID
-    }
-  | IStartTyping {
-      iStartTypingChat :: UUID
-    }
-  | IStopTyping {
-      iStopTypingChat :: UUID
-    }
-  | IMessage {
-      iMessageChat :: UUID,
-      iMessageKind :: Word8,
-      iMessageData :: B.ByteString
-    }
-  | ICreateChat {
-      iCreateChatUsers :: [UUID]
-    }
+  = IAuthenticate
+      UUID -- ^ uuid to authenticate
+  | IStartTyping
+      UUID -- ^ chat UUID
+  | IStopTyping
+      UUID -- ^ chat UUID
+  | IMessage 
+      UUID -- ^ chat uuid
+      Word8 -- ^ message kind TODO: define this
+      B.ByteString -- ^ message body
+  | ICreateChat
+      [UUID] -- ^ relevant user UUIDs
   deriving (Eq,Show)
   
 getIncoming :: Get Incoming
@@ -146,23 +148,19 @@ getIncoming = getWord8 >>= f
       
 data Outgoing
   = OAuthSuccess
-  | OStartTyping {
-      oStartTypingUser :: UUID,
-      oStartTypingChat :: UUID
-    }
-  | OStopTyping {
-      oStopTypingUser :: UUID,
-      oStopTypingChat :: UUID
-    }
-  | OMessage {
-      oMessageSender :: UUID,
-      oMessageChat :: UUID,
-      oMessageKind :: Word8,
-      oMessageData :: B.ByteString
-    }
-  | OChatInclusion {
-      oChatInclusionChat :: UUID
-    }
+  | OStartTyping
+      UUID -- ^ typing user
+      UUID -- ^ chat uuid he's typing in
+  | OStopTyping
+      UUID -- ^ typing user
+      UUID -- ^ chat uuid he's typing in
+  | OMessage
+      UUID -- ^ UUID of sender
+      UUID -- ^ chat uuid
+      Word8 -- ^ message kind (see 'IMessage' constructor)
+      B.ByteString -- ^ message payload
+  | OChatInclusion
+      UUID -- ^ relevant chat UUID
   deriving (Eq,Show)
 
 putOutgoing :: Outgoing -> Put

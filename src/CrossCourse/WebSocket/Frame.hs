@@ -25,8 +25,8 @@ module CrossCourse.WebSocket.Frame
 where
 
 import Data.Bits
-import Data.Int
-import Data.Word
+-- import Data.Int
+-- import Data.Word
 
 import Data.Binary
 import Data.Binary.Get
@@ -50,11 +50,9 @@ unmask :: Frame -> Frame
 unmask f = f { frameMask = Nothing, framePayload = frameUnmaskedPayload f}
 
 frameUnmaskedPayload :: Frame -> BL.ByteString
-frameUnmaskedPayload (Frame _ _ _ _ _ mask pl) = maybe pl (flip maskPayload pl) mask
-  where
-    maskPayload mask = snd . BL.mapAccumL f 0
-      where f !i !c = ((i + 1) `mod` (B.length mask),
-                       (B.index mask i) `xor` c)
+frameUnmaskedPayload (Frame _ _ _ _ _ Nothing pl) = pl
+frameUnmaskedPayload (Frame _ _ _ _ _ (Just mask) pl) = snd $ BL.mapAccumL f 0 pl
+  where f !i !c = ((i + 1) `mod` (B.length mask), (B.index mask i) `xor` c)
 
 -- |The type of WebSockets frame.
 data FrameType
@@ -94,7 +92,7 @@ instance Binary Frame where
       convertOpcode 0x08 = return CloseFrame
       convertOpcode 0x09 = return PingFrame
       convertOpcode 0x0a = return PongFrame
-      convertOpcode opcode = fail $ "unknown opcode: " ++ show opcode
+      convertOpcode x = fail $ "unknown opcode: " ++ show x
       fin    b = b .&. 0x80 == 0x80
       rsv1   b = b .&. 0x40 == 0x40
       rsv2   b = b .&. 0x20 == 0x20
