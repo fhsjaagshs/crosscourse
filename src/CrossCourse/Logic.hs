@@ -98,7 +98,7 @@ logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
     mapMChat cuuid g = (lift $ H.lookup chats cuuid) >>= mapM_ g . fromMaybe []
     f _ (IAuthenticate user) = do
       lift $ auth hdls authmv (Just (user,hdl))
-      yield (user,OAuthSuccess)
+      yield (user,OAuthSuccess user)
     f (Just a) (IStartTyping c) = mapMChat c $ yield . (,OStartTyping a c)
     f (Just a) (IStopTyping c) = mapMChat c $ yield . (,OStopTyping a c)
     f (Just a) (IMessage c k d) = mapMChat c $ yield . (,OMessage a c k d)
@@ -148,6 +148,7 @@ getIncoming = getWord8 >>= f
       
 data Outgoing
   = OAuthSuccess
+      UUID -- ^ authenticated user
   | OStartTyping
       UUID -- ^ typing user
       UUID -- ^ chat uuid he's typing in
@@ -164,7 +165,7 @@ data Outgoing
   deriving (Eq,Show)
 
 putOutgoing :: Outgoing -> Put
-putOutgoing OAuthSuccess = putWord8 0
+putOutgoing (OAuthSuccess u) = putWord8 0 >> put u
 putOutgoing (OStartTyping u c) = putWord8 1 >> put u >> put c
 putOutgoing (OStopTyping u c) = putWord8 2 >> put u >> put c
 putOutgoing (OMessage s c k d) = putWord8 3 >> put s >> put c >> put k >> put d
