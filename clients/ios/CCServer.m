@@ -29,6 +29,18 @@ NSUUID *dataUUID(NSData *data) {
     return [[NSUUID alloc]initWithUUIDBytes:data.bytes];
 }
 
+// convert a uint32_t into a big-endian NSData
+NSData *uint32DataBE(uint32_t v) {
+    uint8_t *bytes = (uint8_t *)malloc(sizeof(uint8_t)*4);
+    
+    bytes[3] = (v >> 24) & 0xFF;
+    bytes[2] = (v >> 16) & 0xFF;
+    bytes[1] = (v >> 8) & 0xFF;
+    bytes[0] = v & 0xFF;
+    
+    return [NSData dataWithBytesNoCopy:bytes length:4 freeWhenDone:YES];
+}
+
 @interface CCServer () <JFRWebSocketDelegate>
 
 @property (nonatomic,strong) JFRWebSocket *socket;
@@ -71,8 +83,7 @@ NSUUID *dataUUID(NSData *data) {
 - (void)createChat:(NSArray<NSUUID *> *)uuids {
     if (self.socket.isConnected) {
         NSMutableData *d = [NSMutableData data];
-        uint8_t count = (uint8_t)uuids.count;
-        [d appendBytes:&count length:1];
+        [d appendData:uint32DataBE((uint32_t)uuids.count)];
         for (NSUUID *u in uuids) {
             [d appendData:uuidData(u)];
         }

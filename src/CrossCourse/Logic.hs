@@ -27,6 +27,8 @@ import Data.Binary.Get
 import Data.Binary.Put
 
 import qualified Data.HashTable.IO as H
+
+import Debug.Trace
   
 {-
 TODO
@@ -119,7 +121,7 @@ data Incoming
       UUID -- ^ chat UUID
   | IStopTyping
       UUID -- ^ chat UUID
-  | IMessage 
+  | IMessage
       UUID -- ^ chat uuid
       Word8 -- ^ message kind TODO: define this
       B.ByteString -- ^ message body
@@ -133,11 +135,11 @@ getIncoming = getWord8 >>= f
     f 0 = IAuthenticate <$> get
     f 1 = IStartTyping <$> get
     f 2 = IStopTyping <$> get
-    f 3 = IMessage <$> get <*> get <*> (getWord64be >>= getByteString . fromIntegral)
+    f 3 = IMessage <$> get <*> get <*> (getWord32be >>= getByteString . fromIntegral)
     f 4 = ICreateChat <$> getList
     f _ = fail "unsupported message"
     getList :: Binary a => Get [a]
-    getList = go =<< getWord64be
+    getList = go . traceShowId =<< getWord32be
       where
         go left
           | left <= 0 = pure []

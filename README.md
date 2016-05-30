@@ -51,7 +51,7 @@ CrossCourse uses a binary protocol over WebSockets called `crosscourse`. You mus
 
 `%` opcode, 8-bit unsigned integer
 
-`#` 64-bit unsigned integer
+`#` 32-bit unsigned integer
 
 `u` user, 128-bit UUID
 

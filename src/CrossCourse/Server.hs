@@ -21,8 +21,7 @@ import Network.Socket
 {-
 TODO:
 - signal/exit handlers: close all websockets
-  - de-auth: closing the connection should be as simple as
-  - exiting the pipe loop
+  - de-auth: closing the connection should be as simple as exiting the pipe loop
 -}
 
 -- |Start a given websocket server given a port and 'Logic'.

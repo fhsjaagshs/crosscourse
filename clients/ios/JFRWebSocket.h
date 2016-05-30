@@ -4,6 +4,7 @@
 //
 //  Created by Austin and Dalton Cherry on 5/13/14.
 //  Copyright (c) 2014 Vluxe. All rights reserved.
+//  Modified 2016 by Nathaniel Symer
 //
 /////////////////////////////////////////////////////////////////////////////
 
@@ -12,10 +13,7 @@
 
 @class JFRWebSocket;
 
-/**
- It is important to note that all the delegate methods are put back on the main thread.
- This means if you want to do some major process of the data, you need to create a background thread.
- */
+// All delegate methods are called on the main thread.
 @protocol JFRWebSocketDelegate <NSObject>
 
 @optional
@@ -23,28 +21,28 @@
  The websocket connected to its host.
  @param socket is the current socket object.
  */
--(void)websocketDidConnect:(JFRWebSocket*)socket;
+- (void)websocketDidConnect:(JFRWebSocket *)socket;
 
 /**
  The websocket was disconnected from its host.
  @param socket is the current socket object.
  @param error is return an error occured to trigger the disconnect.
  */
--(void)websocketDidDisconnect:(JFRWebSocket*)socket error:(NSError*)error;
+- (void)websocketDidDisconnect:(JFRWebSocket *)socket error:(NSError *)error;
 
 /**
  The websocket got a text based message.
  @param socket is the current socket object.
  @param string is the text based data that has been returned.
  */
--(void)websocket:(JFRWebSocket*)socket didReceiveMessage:(NSString*)string;
+- (void)websocket:(JFRWebSocket *)socket didReceiveMessage:(NSString *)string;
 
 /**
  The websocket got a binary based message.
  @param socket is the current socket object.
  @param data is the binary based data that has been returned.
  */
--(void)websocket:(JFRWebSocket*)socket didReceiveData:(NSData*)data;
+- (void)websocket:(JFRWebSocket *)socket didReceiveData:(NSData *)data;
 
 @end
 

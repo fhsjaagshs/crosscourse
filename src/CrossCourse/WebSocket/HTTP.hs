@@ -28,6 +28,7 @@ import Control.Monad
 import Data.List
 import Data.Maybe
 import Data.Bool
+import Data.Char
 import           Data.ByteString.Internal (c2w)
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString as B
@@ -39,8 +40,6 @@ import Data.Binary.Put
 import Data.Attoparsec.ByteString
 import Crypto.Hash (Digest,SHA1,hash)
 import Data.ByteArray (convert)
-
-import Text.Read
 
 import System.IO
 
@@ -64,7 +63,6 @@ putHeader k v = do
   putByteString v
   putByteString "\r\n"
 
--- TODO: double check me
 mkBadRequestResponse :: B.ByteString -> B.ByteString
 mkBadRequestResponse msg = BL.toStrict $ runPut $ do
   putByteString "HTTP/1.1 400 Bad Request\r\n"
@@ -91,19 +89,17 @@ wsHandshake :: Handle -> IO () -> IO ()
 wsHandshake hdl success = parseWith chunk request "" >>= maybe badRequest f . maybeResult
     where
       f (Request "GET" _ "1.1",hdrs) = do
-        let hdrs' = map (\(Header k vs) -> (k,mconcat vs)) hdrs
+        let hdrs' = map (\(Header k vs) -> (BC.map toLower k,mconcat vs)) hdrs
         flushBody hdrs'
-        -- TODO: header case-insensitivity
         maybe badRequest ((>> success) . B.hPut hdl . mkHandshakeResponse) $ do
-          ensure "Upgrade"     $ lookup "Connection"             hdrs'
-          ensure "websocket"   $ lookup "Upgrade"                hdrs'
-          ensure "13"          $ lookup "Sec-WebSocket-Version"  hdrs'
-          ensure "crosscourse" $ lookup "Sec-WebSocket-Protocol" hdrs'
-          lookup "Sec-WebSocket-Key" hdrs'
-      f _ = putStrLn "badreq" >> badRequest
+          ensure "Upgrade"     $ lookup "connection"             hdrs'
+          ensure "websocket"   $ lookup "upgrade"                hdrs'
+          ensure "13"          $ lookup "sec-websocket-version"  hdrs'
+          ensure "crosscourse" $ lookup "sec-websocket-protocol" hdrs'
+          lookup "sec-websocket-key" hdrs'
+      f _ = badRequest
       chunk = B.hGetSome hdl 4092
-      flushBody hdrs = maybe (pure ()) (void . B.hGetSome hdl) $ do
-        clenh <- lookup "Content-Length" hdrs
-        readMaybe $ BC.unpack clenh
+      flushBody hdrs = maybe (pure ()) (void . B.hGetNonBlocking hdl) $ do
+        fmap fst . BC.readInt =<< lookup "content-length" hdrs
       badRequest = B.hPut hdl $ mkBadRequestResponse "invalid websocket handshake."
       ensure v = maybe Nothing (bool Nothing (Just ()) . (== v))

@@ -39,9 +39,10 @@ import Data.Binary
 import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
-import qualified Data.ByteString.Lazy.Char8 as BLC
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TL
+  
+import Debug.Trace
   
 data Message = Message {
   messagePayload :: !BL.ByteString,
@@ -56,7 +57,7 @@ instance Binary Message where
 -- |WebSocket logic. Responds to incoming frames, closing @hdl@ if necessary.
 -- Yields 'Message's to be used in a pipeline.
 websocket :: Handle -> Producer Message IO ()
-websocket hdl = fromHandle' hdl >-> parseFrames >-> demuxFrames >-> evalFrames hdl
+websocket hdl = fromHandle' hdl >-> parseFrames hdl >-> demuxFrames hdl >-> evalFrames hdl
 
 -- |Creates a producer from a 'Handle'.
 fromHandle' :: Handle -> Producer B.ByteString IO ()
@@ -67,23 +68,22 @@ fromHandle' h = fix $ \fx -> do
     fx
    
 -- |Parses a stream of bytes as @Frame@s.       
-parseFrames :: Pipe B.ByteString Frame IO ()
-parseFrames = loop ""
+parseFrames :: Handle -> Pipe B.ByteString Frame IO ()
+parseFrames hdl = loop ""
   where
-    mkClose = Frame True False False False CloseFrame Nothing
-    l = yield . mkClose . mappend (runPut $ putWord16be 1) . BLC.pack
+    l = lift . closeWebsocketCode hdl 1
     r fx (remaining,frame) = yield frame >> fx remaining
     loop = fix $ \fx leftover -> runGetWith get leftover await >>= either l (r fx)
 
 -- |Demultiplexes 'Frame's.
-demuxFrames :: Pipe Frame Frame IO ()
-demuxFrames = fix $ \fx -> (await >>= awaitConts) >> fx
+demuxFrames :: Handle -> Pipe Frame Frame IO ()
+demuxFrames hdl = fix $ \fx -> (await >>= awaitConts) >> fx
   where
     awaitConts f
       | frameFin f = yield f
       | otherwise = do
         f2@(Frame fin _ _ _ typ2 _ _) <- await
-        when (typ2 /= ContinuationFrame) $ fail "expected continuation frame"
+        when (typ2 /= ContinuationFrame) $ lift $ closeWebsocketCode hdl 2 "unexpected continuation frame"
         awaitConts $ f {
           frameFin = fin,
           frameMask = Nothing,
@@ -115,5 +115,5 @@ closeWebsocket hdl reason = do
   where closeFrame = Frame True False False False CloseFrame Nothing reason
   
 closeWebsocketCode :: Handle -> Word16 -> String -> IO ()
-closeWebsocketCode hdl code reason = closeWebsocket hdl $ encode code <> utf8Reason
+closeWebsocketCode hdl code reason = closeWebsocket hdl $ (runPut $ putWord16be code) <> utf8Reason
   where utf8Reason = TL.encodeUtf8 $ TL.pack reason
