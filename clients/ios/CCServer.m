@@ -8,38 +8,8 @@
 
 #import "CCServer.h"
 #import "JFRWebSocket.h"
-
-// append an opcode to payload data.
-NSData *cc_command(uint8_t opcode,NSData *d) {
-    uint8_t *buf = (uint8_t *)malloc(sizeof(uint8_t)*(d.length+1));
-    buf[0] = opcode;
-    memcpy(buf+1, d.bytes, d.length);
-    return [NSData dataWithBytesNoCopy:buf length:(d.length+1) freeWhenDone:YES];
-}
-
-// convert a NSUUID to an NSData.
-NSData *uuidData(NSUUID *uuid) {
-    uuid_t uuidbuf;
-    [uuid getUUIDBytes:uuidbuf];
-    return [NSData dataWithBytes:uuidbuf length:16];
-}
-
-NSUUID *dataUUID(NSData *data) {
-    if (data.length != 16) return nil;
-    return [[NSUUID alloc]initWithUUIDBytes:data.bytes];
-}
-
-// convert a uint32_t into a big-endian NSData
-NSData *uint32DataBE(uint32_t v) {
-    uint8_t *bytes = (uint8_t *)malloc(sizeof(uint8_t)*4);
-    
-    bytes[3] = (v >> 24) & 0xFF;
-    bytes[2] = (v >> 16) & 0xFF;
-    bytes[1] = (v >> 8) & 0xFF;
-    bytes[0] = v & 0xFF;
-    
-    return [NSData dataWithBytesNoCopy:bytes length:4 freeWhenDone:YES];
-}
+#import "CCDataReader.h"
+#import "CCDataBuilder.h"
 
 @interface CCServer () <JFRWebSocketDelegate>
 
@@ -76,19 +46,54 @@ NSData *uint32DataBE(uint32_t v) {
 
 - (void)authenticate:(NSUUID *)uuid {
     if (self.socket.isConnected) {
-        [self.socket writeData:cc_command(0, uuidData(uuid))];
+        CCDataBuilder *b = CCDataBuilder.new;
+        [b write8BitUnsignedInteger:0];
+        [b writeUUID:uuid];
+        [self.socket writeData:b.data];
+    }
+}
+
+- (void)startedTyping:(NSUUID *)chat {
+    if (self.socket.isConnected) {
+        CCDataBuilder *b = CCDataBuilder.new;
+        [b write8BitUnsignedInteger:1];
+        [b writeUUID:chat];
+        [self.socket writeData:b.data];
+    }
+}
+
+- (void)stopTyping:(NSUUID *)chat {
+    if (self.socket.isConnected) {
+        CCDataBuilder *b = CCDataBuilder.new;
+        [b write8BitUnsignedInteger:2];
+        [b writeUUID:chat];
+        [self.socket writeData:b.data];
+    }
+}
+
+- (void)sendMessage:(NSData *)message to:(NSUUID *)recipient kind:(uint8_t)kind {
+    if (self.socket.isConnected) {
+        CCDataBuilder *b = CCDataBuilder.new;
+        [b write8BitUnsignedInteger:3];
+        [b writeUUID:recipient];
+        [b write8BitUnsignedInteger:kind];
+        [b write32BitUnsignedIntegerBigEndian:(uint32_t)message.length];
+        [b writeBytes:message];
+        [self.socket writeData:b.data];
     }
 }
 
 - (void)createChat:(NSArray<NSUUID *> *)uuids {
     if (self.socket.isConnected) {
-        NSMutableData *d = [NSMutableData data];
-        [d appendData:uint32DataBE((uint32_t)uuids.count)];
+        CCDataBuilder *b = CCDataBuilder.new;
+        [b write8BitUnsignedInteger:4];
+        [b write32BitUnsignedIntegerBigEndian:(uint32_t)uuids.count];
+        
         for (NSUUID *u in uuids) {
-            [d appendData:uuidData(u)];
+            [b writeUUID:u];
         }
-        NSLog(@"sending: %@",cc_command(4,d));
-        [self.socket writeData:cc_command(4,d)];
+
+        [self.socket writeData:b.data];
     }
 }
 
@@ -96,23 +101,51 @@ NSData *uint32DataBE(uint32_t v) {
 
 - (void)evaluateResponse:(NSData *)data {
     if (data.length > 0) {
-        uint8_t *buf = (uint8_t *)data.bytes;
-        
-        uint8_t opcode = buf[0];
-        
-        switch (opcode) {
-            case 0: {
-                _authenticatedUser = [[NSUUID alloc]initWithUUIDBytes:buf+1];
-                if (self.onAuthenticated) {
-                    self.onAuthenticated();
+        CCDataReader *r = [CCDataReader dataReaderWithData:data.mutableCopy];
+        @try {
+            switch ([r read8BitUnsignedInteger]) {
+                case 0: {
+                    _authenticatedUser = [r readUUID];
+                    if (self.onAuthenticated) {
+                        self.onAuthenticated();
+                    }
+                    break;
                 }
-                break;
+                case 1: {
+                    if (self.onStartTyping) {
+                        self.onStartTyping([r readUUID],[r readUUID]);
+                    }
+                    break;
+                }
+                case 2: {
+                    if (self.onStopTyping) {
+                        self.onStopTyping([r readUUID],[r readUUID]);
+                    }
+                    break;
+                }
+                case 3: {
+                    if (self.onMessage) {
+                        self.onMessage([r readUUID],[r readUUID],[r read8BitUnsignedInteger],[r popBytes:[r read32BitUnsignedIntegerBigEndian]]);
+                    }
+                    break;
+                }
+                case 4: {
+                    if (self.onChatInclusion) {
+                        self.onChatInclusion([r readUUID]);
+                    }
+                    break;
+                }
+                default: {
+                    if (self.onError) {
+                        self.onError([NSError errorWithDomain:@"crosscourse" code:0 userInfo:@{NSLocalizedDescriptionKey: @"Invalid opcode."}]);
+                    }
+                    break;
+                }
             }
-            default: {
-                if (self.onError) {
-                    self.onError([NSError errorWithDomain:@"crosscourse" code:0 userInfo:@{NSLocalizedDescriptionKey: @"Invalid opcode."}]);
-                }
-                break;
+        } @catch (NSException *e) {
+            [self.socket disconnect];
+            if (self.onError) {
+                self.onError([NSError errorWithDomain:e.name code:1 userInfo:@{NSLocalizedDescriptionKey: e.reason}]);
             }
         }
     }
@@ -138,7 +171,6 @@ NSData *uint32DataBE(uint32_t v) {
 }
 
 - (void)websocket:(JFRWebSocket *)socket didReceiveData:(NSData *)data {
-    NSLog(@"Received data: %@",data);
     [self evaluateResponse:data];
 }
 

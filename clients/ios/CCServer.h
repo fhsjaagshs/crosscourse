@@ -33,6 +33,9 @@ typedef void (^MessageHandler)(NSUUID *sender,NSUUID *chat,uint8_t kind,NSData *
 - (void)disconnect;
 
 - (void)authenticate:(NSUUID *)uuid;
+- (void)startedTyping:(NSUUID *)chat;
+- (void)stopTyping:(NSUUID *)chat;
+- (void)sendMessage:(NSString *)message to:(NSUUID *)recipient kind:(uint8_t)kind;
 - (void)createChat:(NSArray<NSUUID *> *)uuids;
 
 @end

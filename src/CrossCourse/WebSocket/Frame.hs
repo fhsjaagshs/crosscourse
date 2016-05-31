@@ -25,8 +25,6 @@ module CrossCourse.WebSocket.Frame
 where
 
 import Data.Bits
--- import Data.Int
--- import Data.Word
 
 import Data.Binary
 import Data.Binary.Get

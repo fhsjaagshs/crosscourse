@@ -9,6 +9,7 @@
 /////////////////////////////////////////////////////////////////////////////
 
 #import "JFRWebSocket.h"
+#import "CCDataReader.h"
 
 //get the opCode from the packet
 typedef NS_ENUM(NSUInteger, JFROpCode) {
@@ -263,16 +264,15 @@ static const size_t  JFRMaxFrameSize   = 32;
     } else {
         self.certValidated = YES; // not an https session, so no need to check SSL pinning
     }
-    if(self.voipEnabled) {
+    if (self.voipEnabled) {
         [self.inputStream setProperty:NSStreamNetworkServiceTypeVoIP forKey:NSStreamNetworkServiceType];
         [self.outputStream setProperty:NSStreamNetworkServiceTypeVoIP forKey:NSStreamNetworkServiceType];
     }
-    if(self.selfSignedSSL) {
+    if (self.selfSignedSSL) {
         NSString *chain = (__bridge_transfer NSString *)kCFStreamSSLValidatesCertificateChain;
         NSString *peerName = (__bridge_transfer NSString *)kCFStreamSSLValidatesCertificateChain;
         NSString *key = (__bridge_transfer NSString *)kCFStreamPropertySSLSettings;
-        NSDictionary *settings = @{chain: [[NSNumber alloc] initWithBool:NO],
-                                   peerName: [NSNull null]};
+        NSDictionary *settings = @{chain: @(NO), peerName: [NSNull null]};
         [self.inputStream setProperty:settings forKey:key];
         [self.outputStream setProperty:settings forKey:key];
     }
@@ -436,20 +436,19 @@ static const size_t  JFRMaxFrameSize   = 32;
     NSDictionary *headers = (__bridge_transfer NSDictionary *)(CFHTTPMessageCopyAllHeaderFields(response));
     NSString *acceptKey = headers[kHeaderWSAccept];
     CFRelease(response);
-    if (acceptKey.length > 0) {
-        return YES;
-    }
-    return NO;
+    return (acceptKey.length > 0);
 }
 
-// TODO: revitalize this
+#pragma mark - WebSocket Client logic
+
+// None of this code makes any sense
+// yet somehow it works. I smell a rat!
 - (void)processRawMessage:(uint8_t *)buffer length:(NSInteger)bufferLen {
     JFRResponse *response = [self.readStack lastObject];
-    if(response && bufferLen < 2) {
+    
+    if (response && bufferLen < 2) {
         self.fragBuffer = [NSData dataWithBytes:buffer length:bufferLen];
-        return;
-    }
-    if (response.bytesLeft > 0) {
+    } else if (response.bytesLeft > 0) {
         NSInteger len = response.bytesLeft;
         NSInteger extra =  bufferLen - response.bytesLeft;
         if (response.bytesLeft > bufferLen) {
@@ -457,15 +456,12 @@ static const size_t  JFRMaxFrameSize   = 32;
             extra = 0;
         }
         response.bytesLeft -= len;
-        [response.buffer appendData:[NSData dataWithBytes:buffer length:len]];
+        [response.buffer appendBytes:buffer length:len];
         [self processResponse:response];
         NSInteger offset = bufferLen - extra;
-        if(extra > 0) {
-            [self processExtra:(buffer+offset) length:extra];
-        }
-        return;
+        if (extra > 0) [self processExtra:(buffer+offset) length:extra];
     } else {
-        if(bufferLen < 2) { // we need at least 2 bytes for the header
+        if (bufferLen < 2) { // we need at least 2 bytes for the header
             self.fragBuffer = [NSData dataWithBytes:buffer length:bufferLen];
             return;
         }
@@ -474,7 +470,8 @@ static const size_t  JFRMaxFrameSize   = 32;
         BOOL isMasked = (JFRMaskMask & buffer[1]);
         uint8_t payloadLen = (JFRPayloadLenMask & buffer[1]);
         NSInteger offset = 2; //how many bytes do we need to skip for the header
-        if ((isMasked  || (JFRRSVMask & buffer[0])) && receivedOpcode != JFROpCodePong) {
+        
+        if ((isMasked || (JFRRSVMask & buffer[0])) && receivedOpcode != JFROpCodePong) {
             [self doDisconnect:[self errorWithDetail:@"masked and rsv data is not currently supported" code:JFRCloseCodeProtocolError]];
             [self writeError:JFRCloseCodeProtocolError];
             return;
@@ -492,7 +489,6 @@ static const size_t  JFRMaxFrameSize   = 32;
         }
         
         BOOL isControlFrame = (receivedOpcode == JFROpCodeConnectionClose || receivedOpcode == JFROpCodePing);
-        
 
         if (isControlFrame && !isFin) {
             [self doDisconnect:[self errorWithDetail:@"control frames can't be fragmented" code:JFRCloseCodeProtocolError]];
@@ -506,15 +502,13 @@ static const size_t  JFRMaxFrameSize   = 32;
             return;
         }
         
-        if(receivedOpcode == JFROpCodeConnectionClose) {
-            //the server disconnected us
+        if (receivedOpcode == JFROpCodeConnectionClose) {
             uint16_t code = JFRCloseCodeNormal;
-            if(payloadLen == 1) {
+            if (payloadLen == 1) {
                 code = JFRCloseCodeProtocolError;
-            }
-            else if(payloadLen > 1) {
+            } else if(payloadLen > 1) {
                 code = CFSwapInt16BigToHost(*(uint16_t *)(buffer+offset) );
-                if(code < 1000 || (code > 1003 && code < 1007) || (code > 1011 && code < 3000)) {
+                if (code < 1000 || (code > 1003 && code < 1007) || (code > 1011 && code < 3000)) {
                     code = JFRCloseCodeProtocolError;
                 }
                 offset += 2;
@@ -545,22 +539,21 @@ static const size_t  JFRMaxFrameSize   = 32;
             dataLength = CFSwapInt16BigToHost(*(uint16_t *)(buffer+offset) );
             offset += sizeof(uint16_t);
         }
-        if(bufferLen < offset) { // we cannot process this yet, nead more header data
+        
+        if (bufferLen < offset) { // we cannot process this yet, nead more header data
             self.fragBuffer = [NSData dataWithBytes:buffer length:bufferLen];
             return;
         }
+        
         NSInteger len = dataLength;
         if (dataLength > (bufferLen-offset) || (bufferLen - offset) < dataLength) {
             len = bufferLen-offset;
         }
-        NSData *data = nil;
-        if (len < 0) {
-            len = 0;
-            data = [NSData data];
-        } else {
-            data = [NSData dataWithBytes:(buffer+offset) length:len];
-        }
-        if(receivedOpcode == JFROpCodePong) {
+        
+        if (len < 0) len = 0;
+        NSData *data = [NSData dataWithBytes:(buffer+offset) length:len];
+
+        if (receivedOpcode == JFROpCodePong) {
             NSInteger step = (offset+len);
             NSInteger extra = bufferLen-step;
             if (extra > 0) [self processRawMessage:(buffer+step) length:extra];
@@ -573,6 +566,7 @@ static const size_t  JFRMaxFrameSize   = 32;
             [self writeError:JFRCloseCodeProtocolError];
             return;
         }
+        
         BOOL isNew = NO;
         if (!response) {
             if(receivedOpcode == JFROpCodeContinueFrame) {

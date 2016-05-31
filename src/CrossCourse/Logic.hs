@@ -27,8 +27,6 @@ import Data.Binary.Get
 import Data.Binary.Put
 
 import qualified Data.HashTable.IO as H
-
-import Debug.Trace
   
 {-
 TODO
@@ -139,11 +137,10 @@ getIncoming = getWord8 >>= f
     f 4 = ICreateChat <$> getList
     f _ = fail "unsupported message"
     getList :: Binary a => Get [a]
-    getList = go . traceShowId =<< getWord32be
-      where
-        go left
-          | left <= 0 = pure []
-          | otherwise = (:) <$> get <*> go (left-1)
+    getList = go =<< getWord32be
+      where go left
+              | left <= 0 = pure []
+              | otherwise = (:) <$> get <*> go (left-1)
       
 data Outgoing
   = OAuthSuccess
