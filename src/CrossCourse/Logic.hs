@@ -11,6 +11,7 @@ import CrossCourse.WebSocket
 import CrossCourse.Binary
 
 import Pipes
+import Control.Monad.Fix
 import Control.Concurrent hiding (yield)
 
 import System.IO
@@ -68,43 +69,46 @@ auth hdls authmv v = do
 
 -- |Deserialize incoming messages into 'Incoming's.
 deserialize :: Handle -> Pipe Message Incoming IO ()
-deserialize hdl = do
+deserialize hdl = fix $ \loop -> do
   Message msg isBinary <- await
   if not isBinary
     then lift $ closeWebsocketCode hdl invalidMessageError "utf8 message received"
     else case runGetOrFail getIncoming msg of
       Left (_,_,err) -> lift $ closeWebsocketCode hdl invalidMessageError err
-      Right (_,_,v) -> yield v
+      Right (_,_,v) -> yield v >> loop
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
 serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) IO ()
-serialize hdls = do
+serialize hdls = fix $ \loop -> do
   (uuid,outgoing) <- await
   dest            <- lift $ H.lookup hdls uuid
   let msg = Message (runPut $ putOutgoing outgoing) True
   maybe (yield Nothing) (yield . Just . (,msg)) dest
+  loop
   
 sendMessage :: Consumer (Maybe (Handle,Message)) IO ()
-sendMessage = await >>= f
+sendMessage = fix $ \go -> (await >>= f) >> go
   where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
-        f _ = return ()
+        f _ = pure ()
 
 logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
-logic' hdl authmv hdls chats = (lift $ readMVar authmv) >>= (await >>=) . f
+logic' hdl authmv hdls chats = fix $ \loop -> (lift $ readMVar authmv) >>= (await >>=) . f loop
   where
     mapMChat cuuid u g = (lift $ H.lookup chats cuuid) >>= mapM_ g . delete u . fromMaybe []
-    f _ (IAuthenticate user) = do
+    f loop _ (IAuthenticate user) = do
       lift $ auth hdls authmv (Just (user,hdl))
       yield (user,OAuthSuccess user)
-    f (Just a) (IStartTyping c) = mapMChat c a $ yield . (,OStartTyping a c)
-    f (Just a) (IStopTyping c) = mapMChat c a $ yield . (,OStopTyping a c)
-    f (Just a) (IMessage c k d) = mapMChat c a $ yield . (,OMessage a c k d)
-    f (Just a) (ICreateChat us) = do
+      loop
+    f loop (Just a) (IStartTyping c) = (mapMChat c a $ yield . (,OStartTyping a c)) >> loop
+    f loop (Just a) (IStopTyping c) = (mapMChat c a $ yield . (,OStopTyping a c)) >> loop
+    f loop (Just a) (IMessage c k d) = (mapMChat c a $ yield . (,OMessage a c k d)) >> loop
+    f loop (Just a) (ICreateChat us) = do
       let us' = nub $ a:us
       cuuid <- lift $ nextRandom
       lift $ H.insert chats cuuid us'
       mapM_ (yield . (,OChatInclusion cuuid)) us'
-    f Nothing _ = lift $ closeWebsocketCode hdl unauthedError "not authenticated"
+      loop
+    f _ Nothing _ = lift $ closeWebsocketCode hdl unauthedError "not authenticated"
     
 unauthedError :: Word16
 unauthedError = 101

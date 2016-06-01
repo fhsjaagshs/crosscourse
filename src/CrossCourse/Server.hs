@@ -38,7 +38,7 @@ startServer port logic = withSocketsDo $ tcpSocket port >>= f
               void $ forkIO $ wsHandshake hdl $ do
                 auth <- newMVar Nothing
                 -- TODO: fix this pipe line terminating
-                forever $ runEffect $ websocket hdl >-> logic auth hdl
+                runEffect $ websocket hdl >-> logic auth hdl
                 putStrLn "after"
                 closeWebsocket hdl ""
             else close sock

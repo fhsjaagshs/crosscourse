@@ -39,9 +39,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TL
-  
-import Debug.Trace
-  
+
 data Message = Message {
   messagePayload :: !BL.ByteString,
   messageIsBinary :: !Bool
@@ -62,23 +60,22 @@ fromHandle' :: Handle -> Producer B.ByteString IO ()
 fromHandle' h = fix $ \fx -> do
   eof <- lift $ hIsEOF h
   unless eof $ ((liftIO $ B.hGetNonBlocking h 4092) >>= yield) >> fx
-   
+
 -- |Parses a stream of bytes as @Frame@s.       
 parseFrames :: Handle -> Pipe B.ByteString Frame IO ()
-parseFrames hdl = loop ""
-  where
-    l = lift . closeWebsocketCode hdl 1
-    r fx (xs,frame) = yield frame >> fx xs
-    loop = fix $ \fx xs -> runGetWith get xs await >>= either l (r fx)
+parseFrames hdl = f ""
+  where l = lift . closeWebsocketCode hdl 1
+        r (xs,frame) = yield frame >> f xs
+        f xs = runGetWith get xs await >>= either l r
 
 -- TODO: ignore unmasked frames
 
 -- |Demultiplexes 'Frame's.
 demuxFrames :: Handle -> Pipe Frame Frame IO ()
-demuxFrames hdl = fix $ \fx -> (await >>= awaitConts) >> fx
+demuxFrames hdl = await >>= awaitConts
   where
     awaitConts f
-      | frameFin f = yield f
+      | frameFin f = yield f >> (await >>= awaitConts)
       | otherwise = do
         f2@(Frame fin _ _ _ typ2 _ _) <- await
         when (typ2 /= ContinuationFrame) $ lift $ closeWebsocketCode hdl 2 "unexpected continuation frame"
