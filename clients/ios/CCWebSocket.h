@@ -29,6 +29,7 @@ extern NSString *const CCWebSocketServerErrorDomain; // errors detected by serve
 
 - (void)connect;
 - (void)close;
+- (void)closeWithError:(NSError *)error;
 
 - (void)writeData:(NSData *)data;
 - (void)writeString:(NSString *)string;

@@ -16,7 +16,7 @@ NSString *const CCWebSocketServerErrorDomain = @"CCWebSocketServerErrorDomain";
 
 /*
  TODO:
- - frame write queuing
+ - frame write queuing: using NSOperationQueues
  - proper ponging
  - SSL/TLS
  */
@@ -87,7 +87,7 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
 
 - (void)writeString:(NSString *)string {
     CCFrame *f = [CCFrame frameWithType:CCFrameTypeText];
-    f.payload = [string dataUsingEncoding:NSUTF8StringEncoding]; // TODO: double check
+    f.payload = [string dataUsingEncoding:NSUTF8StringEncoding];
     [self writeFrame:f];
 }
 
@@ -104,30 +104,37 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
     return [self.url.scheme isEqualToString:@"https"] || [self.url.scheme isEqualToString:@"wss"];
 }
 
+// pure
+// ensures @url@ will work as an HTTP url.
+- (NSURL *)sanitizeURL:(NSURL *)url {
+    NSString *scheme = url.scheme;
+    if ([scheme isEqualToString:@"wss"]) scheme = @"https";
+    if ([scheme isEqualToString:@"ws"]) scheme = @"http";
+    
+    NSURLComponents *comps = [[NSURLComponents alloc]initWithURL:url resolvingAgainstBaseURL:NO];
+    comps.port = url.port ?: ([scheme isEqualToString:@"https"] ? @443 : @80);
+    comps.scheme = scheme;
+    return comps.URL;
+}
+
 #pragma mark - HTTP
 
 // nondeterministic, non-effectful
 // build an HTTP Request for the WebSockets HTTP handshake
 - (NSData *)createHTTPRequest {
-    NSString *scheme = _url.scheme;
-    if ([scheme isEqualToString:@"wss"]) scheme = @"https";
-    if ([scheme isEqualToString:@"ws"]) scheme = @"http";
-    
-    NSNumber *port = _url.port ?: ([self isSecure] ? @443 : @80);
+    NSURL *url = [self sanitizeURL:_url];
     
     CFHTTPMessageRef urlRequest = CFHTTPMessageCreateRequest(kCFAllocatorDefault,
                                                              CFSTR("GET"),
-                                                             (__bridge CFURLRef)self.url,
+                                                             (__bridge CFURLRef)url,
                                                              kCFHTTPVersion1_1);
-    
-    
-    
+
     CFHTTPMessageSetHeaderFieldValue(urlRequest,
                                      (__bridge CFStringRef)kHeaderOrigin,
-                                     (__bridge CFStringRef)[NSString stringWithFormat:@"%@://%@:%@",scheme,_url.host,_url.port]);
+                                     (__bridge CFStringRef)[NSString stringWithFormat:@"%@://%@:%@",url.scheme,url.host,url.port]);
     CFHTTPMessageSetHeaderFieldValue(urlRequest,
                                      (__bridge CFStringRef)kHeaderHost,
-                                     (__bridge CFStringRef)[NSString stringWithFormat:@"%@:%@",self.url.host,_url.port]);
+                                     (__bridge CFStringRef)[NSString stringWithFormat:@"%@:%@",url.host,url.port]);
     CFHTTPMessageSetHeaderFieldValue(urlRequest,
                                      (__bridge CFStringRef)kHeaderWSVersion,
                                      (__bridge CFStringRef)@"13");

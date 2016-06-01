@@ -7,14 +7,13 @@
 //
 
 #import "CCServer.h"
-// #import "JFRWebSocket.h"
 #import "CCWebSocket.h"
 #import "CCDataReader.h"
 #import "CCDataBuilder.h"
 
-@interface CCServer () <CCWebSocketDelegate>//<JFRWebSocketDelegate>
+@interface CCServer () <CCWebSocketDelegate>
 
-@property (nonatomic,strong) CCWebSocket *socket;//JFRWebSocket *socket;
+@property (nonatomic,strong) CCWebSocket *socket;
 
 @end
 
@@ -25,7 +24,6 @@
 - (instancetype)initWithURL:(NSURL *)url {
     if ((self = [super init])) {
         _socket = [[CCWebSocket alloc]initWithURL:url protocols:@[@"crosscourse"]];
-        //_socket = [[JFRWebSocket alloc]initWithURL:url protocols:@[@"crosscourse"]];
         _socket.delegate = self;
     }
     return self;
@@ -38,9 +36,7 @@
 }
 
 - (void)disconnect {
-    if (_socket.state != CCWebSocketStateDisconnected) {
-        [_socket close];
-    }
+    [_socket close];
     _authenticatedUser = nil;
 }
 
@@ -156,8 +152,13 @@
 #pragma mark - CCWebSocketDelegate
 
 - (void)websocketDidConnect:(CCWebSocket *)socket {
-    if (self.onConnected) {
-        self.onConnected();
+    if (![socket.availableProtocols containsObject:@"crosscourse"]) {
+        _authenticatedUser = nil;
+        [socket closeWithError:[NSError errorWithDomain:@"crosscourse" code:1 userInfo:@{NSLocalizedDescriptionKey: @"server doesn't support the crosscourse protocol."}]];
+    } else {
+        if (self.onConnected) {
+            self.onConnected();
+        }
     }
 }
 
