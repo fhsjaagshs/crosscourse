@@ -28,14 +28,12 @@ import CrossCourse.Binary
 import CrossCourse.WebSocket.Frame
 
 import Pipes
--- import qualified Pipes.Prelude as P
 import Control.Monad
 import Control.Monad.Fix
 import System.IO
 
 import Data.Monoid
 import Data.Binary
--- import Data.Binary.Get
 import Data.Binary.Put
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
@@ -63,17 +61,17 @@ websocket hdl = fromHandle' hdl >-> parseFrames hdl >-> demuxFrames hdl >-> eval
 fromHandle' :: Handle -> Producer B.ByteString IO ()
 fromHandle' h = fix $ \fx -> do
   eof <- lift $ hIsEOF h
-  unless eof $ do
-    (liftIO $ B.hGetNonBlocking h 4092) >>= yield
-    fx
+  unless eof $ ((liftIO $ B.hGetNonBlocking h 4092) >>= yield) >> fx
    
 -- |Parses a stream of bytes as @Frame@s.       
 parseFrames :: Handle -> Pipe B.ByteString Frame IO ()
 parseFrames hdl = loop ""
   where
     l = lift . closeWebsocketCode hdl 1
-    r fx (remaining,frame) = yield frame >> fx remaining
-    loop = fix $ \fx leftover -> runGetWith get leftover await >>= either l (r fx)
+    r fx (xs,frame) = yield frame >> fx xs
+    loop = fix $ \fx xs -> runGetWith get xs await >>= either l (r fx)
+
+-- TODO: ignore unmasked frames
 
 -- |Demultiplexes 'Frame's.
 demuxFrames :: Handle -> Pipe Frame Frame IO ()
@@ -111,7 +109,7 @@ evalFrames hdl = fix $ \fx -> do
 closeWebsocket :: Handle -> BL.ByteString -> IO ()
 closeWebsocket hdl reason = do
   eof <- hIsEOF hdl
-  unless eof $ (B.hPut hdl $ encode' closeFrame) >> hClose hdl
+  unless eof $ (B.hPut hdl $ encode' closeFrame) -- >> hClose hdl
   where closeFrame = Frame True False False False CloseFrame Nothing reason
   
 closeWebsocketCode :: Handle -> Word16 -> String -> IO ()

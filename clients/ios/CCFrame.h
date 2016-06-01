@@ -33,6 +33,7 @@ extern NSString *const CCFrameReadException;
 @property (nonatomic,strong) NSData *payload;
 
 - (BOOL)isMasked;
+- (void)demask;
 
 - (NSData *)serialize;
 + (CCFrame *)read:(CCDataReader *)r;

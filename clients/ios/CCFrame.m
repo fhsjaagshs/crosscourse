@@ -42,14 +42,56 @@ NSData *generateMask() {
     return _mask != nil;
 }
 
+- (void)demask {
+    if ([self isMasked]) {
+        // TODO: implement me!
+        //frameUnmaskedPayload :: Frame -> BL.ByteString
+        //frameUnmaskedPayload (Frame _ _ _ _ _ Nothing pl) = pl
+        //frameUnmaskedPayload (Frame _ _ _ _ _ (Just mask) pl) = snd $ BL.mapAccumL f 0 pl
+        //where f !i !c = ((i + 1) `mod` (B.length mask), (B.index mask i) `xor` c)
+    }
+}
+
 #pragma mark - Data Representations
 
+// deterministic, stateful
+// serialize @self@ into a binary WebSocket frame
 - (NSData *)serialize {
     CCDataBuilder *b = CCDataBuilder.new;
-    // TODO: serialize
+    
+    [b write8BitUnsignedInteger:(self.fin << 7) | (self.rsv1 << 6) | (self.rsv2 << 5) | (self.rsv3 << 4) | self.type];
+    
+    unsigned long len = self.payload.length;
+    
+    if (len < 126) {
+        [b write8BitUnsignedInteger:([self isMasked] << 7) | ((uint8_t)len)];
+    } else if (len < 0x10000) {
+        [b write8BitUnsignedInteger:([self isMasked] << 7) | ((uint8_t)126)];
+        [b write16BitUnsignedIntegerBigEndian:(uint16_t)len];
+    } else {
+        [b write8BitUnsignedInteger:([self isMasked] << 7) | ((uint8_t)127)];
+        [b write64BitUnsignedIntegerBigEndian:(uint64_t)len];
+    }
+    
+    if ([self isMasked]) {
+        [b writeBytes:self.mask];
+        
+        uint8_t *buf = (uint8_t *)malloc(sizeof(uint8_t)*self.payload.length);
+        
+        for (size_t i = 0; i < self.payload.length; i++) {
+            buf[i] = (((uint8_t *)self.payload.bytes)[i]) ^ (((uint8_t *)self.mask.bytes)[i%sizeof(uint32_t)]);
+        }
+        
+        [b writeBytes:[NSData dataWithBytes:buf length:self.payload.length]];
+    } else {
+        [b writeBytes:self.payload];
+    }
+
     return b.data;
 }
 
+// deterministic, stateful
+// read a frame from a CCDataReader
 + (CCFrame *)read:(CCDataReader *)r {
     CCFrame *f = CCFrame.new;
     

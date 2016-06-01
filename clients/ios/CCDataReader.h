@@ -9,6 +9,7 @@
 #import <Foundation/Foundation.h>
 
 extern NSString * const CCDataReaderException;
+extern NSString * const CCDataReaderLengthException;
 extern NSString * const CCDataReaderTransactionException;
 
 @interface CCDataReader : NSObject <NSCopying>
@@ -26,6 +27,18 @@ extern NSString * const CCDataReaderTransactionException;
 - (BOOL)hasBytes;
 
 - (NSData *)popBytes:(NSUInteger)count;
+- (NSData *)takeAll;
+
+- (void)reset;
+
+- (void)exception:(NSString *)reason;
+
+- (void)matchUTF8String:(NSString *)string;
+- (BOOL)lookaheadMatchUTF8String:(NSString *)string;
+- (NSData *)readLine;
+- (NSData *)readCRLFLine;
+
+- (NSData *)takeWhile:(BOOL(^)(uint8_t))p;
 
 - (NSUUID *)readUUID;
 - (uint8_t)read8BitUnsignedInteger;

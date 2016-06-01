@@ -7,13 +7,14 @@
 //
 
 #import "CCServer.h"
-#import "JFRWebSocket.h"
+// #import "JFRWebSocket.h"
+#import "CCWebSocket.h"
 #import "CCDataReader.h"
 #import "CCDataBuilder.h"
 
-@interface CCServer () <JFRWebSocketDelegate>
+@interface CCServer () <CCWebSocketDelegate>//<JFRWebSocketDelegate>
 
-@property (nonatomic,strong) JFRWebSocket *socket;
+@property (nonatomic,strong) CCWebSocket *socket;//JFRWebSocket *socket;
 
 @end
 
@@ -23,7 +24,8 @@
 
 - (instancetype)initWithURL:(NSURL *)url {
     if ((self = [super init])) {
-        _socket = [[JFRWebSocket alloc]initWithURL:url protocols:@[@"crosscourse"]];
+        _socket = [[CCWebSocket alloc]initWithURL:url protocols:@[@"crosscourse"]];
+        //_socket = [[JFRWebSocket alloc]initWithURL:url protocols:@[@"crosscourse"]];
         _socket.delegate = self;
     }
     return self;
@@ -36,8 +38,8 @@
 }
 
 - (void)disconnect {
-    if (_socket.isConnected) {
-        [_socket disconnect];
+    if (_socket.state != CCWebSocketStateDisconnected) {
+        [_socket close];
     }
     _authenticatedUser = nil;
 }
@@ -45,7 +47,7 @@
 #pragma mark - CrossCourse Protocol Actions
 
 - (void)authenticate:(NSUUID *)uuid {
-    if (self.socket.isConnected) {
+    if (_socket.state == CCWebSocketStateConnected) {
         CCDataBuilder *b = CCDataBuilder.new;
         [b write8BitUnsignedInteger:0];
         [b writeUUID:uuid];
@@ -54,7 +56,7 @@
 }
 
 - (void)startedTyping:(NSUUID *)chat {
-    if (self.socket.isConnected) {
+    if (_socket.state == CCWebSocketStateConnected) {
         CCDataBuilder *b = CCDataBuilder.new;
         [b write8BitUnsignedInteger:1];
         [b writeUUID:chat];
@@ -63,7 +65,7 @@
 }
 
 - (void)stopTyping:(NSUUID *)chat {
-    if (self.socket.isConnected) {
+    if (_socket.state == CCWebSocketStateConnected) {
         CCDataBuilder *b = CCDataBuilder.new;
         [b write8BitUnsignedInteger:2];
         [b writeUUID:chat];
@@ -72,7 +74,7 @@
 }
 
 - (void)sendMessage:(NSData *)message to:(NSUUID *)recipient kind:(uint8_t)kind {
-    if (self.socket.isConnected) {
+    if (_socket.state == CCWebSocketStateConnected) {
         CCDataBuilder *b = CCDataBuilder.new;
         [b write8BitUnsignedInteger:3];
         [b writeUUID:recipient];
@@ -84,7 +86,7 @@
 }
 
 - (void)createChat:(NSArray<NSUUID *> *)uuids {
-    if (self.socket.isConnected) {
+    if (_socket.state == CCWebSocketStateConnected) {
         CCDataBuilder *b = CCDataBuilder.new;
         [b write8BitUnsignedInteger:4];
         [b write32BitUnsignedIntegerBigEndian:(uint32_t)uuids.count];
@@ -143,7 +145,7 @@
                 }
             }
         } @catch (NSException *e) {
-            [self.socket disconnect];
+            [self.socket close];
             if (self.onError) {
                 self.onError([NSError errorWithDomain:e.name code:1 userInfo:@{NSLocalizedDescriptionKey: e.reason}]);
             }
@@ -151,15 +153,15 @@
     }
 }
 
-#pragma mark - JFRWebSocketDelegate
+#pragma mark - CCWebSocketDelegate
 
-- (void)websocketDidConnect:(JFRWebSocket *)socket {
+- (void)websocketDidConnect:(CCWebSocket *)socket {
     if (self.onConnected) {
         self.onConnected();
     }
 }
 
-- (void)websocketDidDisconnect:(JFRWebSocket *)socket error:(NSError *)error {
+- (void)websocketDidDisconnect:(CCWebSocket *)socket error:(NSError *)error {
     [self disconnect];
     if (self.onError && error) {
         self.onError(error);
@@ -170,7 +172,7 @@
     }
 }
 
-- (void)websocket:(JFRWebSocket *)socket didReceiveData:(NSData *)data {
+- (void)websocket:(CCWebSocket *)socket didReceiveData:(NSData *)data {
     [self evaluateResponse:data];
 }
 

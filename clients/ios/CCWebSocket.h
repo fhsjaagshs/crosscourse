@@ -9,11 +9,17 @@
 #import <Foundation/Foundation.h>
 #import "JFRSecurity.h"
 
+// Note about errors:
+// all errors' codes mimic HTTP status codes.
+
 typedef NS_ENUM(NSUInteger, CCWebSocketState) {
     CCWebSocketStateDisconnected,
     CCWebSocketStateHandshaking,
     CCWebSocketStateConnected
 };
+
+extern NSString *const CCWebSocketErrorDomain; // errors detected by client - mimic HTTP status codes
+extern NSString *const CCWebSocketServerErrorDomain; // errors detected by server - no guarantees. These come from close frames.
 
 @protocol CCWebSocketDelegate;
 
@@ -22,7 +28,7 @@ typedef NS_ENUM(NSUInteger, CCWebSocketState) {
 - (instancetype)initWithURL:(NSURL *)url protocols:(NSArray*)protocols;
 
 - (void)connect;
-- (void)disconnect;
+- (void)close;
 
 - (void)writeData:(NSData *)data;
 - (void)writeString:(NSString *)string;
@@ -34,6 +40,7 @@ typedef NS_ENUM(NSUInteger, CCWebSocketState) {
 
 @property (nonatomic,readonly) NSURL *url;
 @property (nonatomic,readonly) NSArray *protocols;
+@property (nonatomic,readonly) NSArray *availableProtocols;
 
 @end
 
@@ -41,6 +48,6 @@ typedef NS_ENUM(NSUInteger, CCWebSocketState) {
 @optional
 - (void)websocketDidConnect:(CCWebSocket *)socket;
 - (void)websocketDidDisconnect:(CCWebSocket *)socket error:(NSError *)error; // error is nil on non-erroneous disconnect
-- (void)websocket:(CCWebSocket *)socket didReceiveMessage:(NSString *)string;
+- (void)websocket:(CCWebSocket *)socket didReceiveUTF8:(NSString *)string;
 - (void)websocket:(CCWebSocket *)socket didReceiveData:(NSData *)data;
 @end
