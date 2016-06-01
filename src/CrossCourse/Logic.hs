@@ -8,7 +8,6 @@ module CrossCourse.Logic
 where
   
 import CrossCourse.WebSocket
-import CrossCourse.Binary
 
 import Pipes
 import Control.Monad.Fix
@@ -48,7 +47,7 @@ Maybe:
 - clustering in 'messageLogic' (forward message to cluster)
 -}
 
-type Logic = Auth -> Handle -> Consumer Message IO ()
+type Logic = Auth -> Pipe Message (Maybe (Handle,Message)) (WebSocketT IO) ()
 type Auth = MVar (Maybe UUID)
 
 type HandleTable = H.CuckooHashTable UUID Handle
@@ -58,7 +57,7 @@ mkLogic :: IO Logic
 mkLogic = logic <$> H.new <*> H.new
 
 logic :: HandleTable -> ChatTable -> Logic
-logic hdls chats = \mv hdl -> deserialize hdl >-> logic' hdl mv hdls chats >-> serialize hdls >-> sendMessage
+logic hdls chats = \mv -> deserialize >-> logic' mv hdls chats >-> serialize hdls
 
 -- |authentication
 auth :: HandleTable -> Auth -> Maybe (UUID,Handle) -> IO ()
@@ -68,35 +67,31 @@ auth hdls authmv v = do
   maybe (pure ()) (uncurry (H.insert hdls)) v
 
 -- |Deserialize incoming messages into 'Incoming's.
-deserialize :: Handle -> Pipe Message Incoming IO ()
-deserialize hdl = fix $ \loop -> do
-  Message msg isBinary <- await
-  if not isBinary
-    then lift $ closeWebsocketCode hdl invalidMessageError "utf8 message received"
-    else case runGetOrFail getIncoming msg of
-      Left (_,_,err) -> lift $ closeWebsocketCode hdl invalidMessageError err
-      Right (_,_,v) -> yield v >> loop
+deserialize :: Pipe Message Incoming (WebSocketT IO) ()
+deserialize = fix $ \loop -> do
+    Message msg isBinary <- await
+    if not isBinary
+      then lift $ closeWSCode invalidMessageError "utf8 message received"
+      else case runGetOrFail getIncoming msg of
+        Left (_,_,err) -> lift $ closeWSCode invalidMessageError err
+        Right (_,_,v) -> yield v >> loop
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
-serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) IO ()
+serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) (WebSocketT IO) ()
 serialize hdls = fix $ \loop -> do
   (uuid,outgoing) <- await
-  dest            <- lift $ H.lookup hdls uuid
+  dest            <- liftIO $ H.lookup hdls uuid
   let msg = Message (runPut $ putOutgoing outgoing) True
   maybe (yield Nothing) (yield . Just . (,msg)) dest
   loop
-  
-sendMessage :: Consumer (Maybe (Handle,Message)) IO ()
-sendMessage = fix $ \go -> (await >>= f) >> go
-  where f (Just (dest,msg)) = lift $ B.hPut dest $ encode' msg
-        f _ = pure ()
 
-logic' :: Handle -> Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) IO ()
-logic' hdl authmv hdls chats = fix $ \loop -> (lift $ readMVar authmv) >>= (await >>=) . f loop
+logic' :: Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) (WebSocketT IO) ()
+logic' authmv hdls chats = fix $ \loop -> (liftIO $ readMVar authmv) >>= (await >>=) . f loop
   where
-    mapMChat cuuid u g = (lift $ H.lookup chats cuuid) >>= mapM_ g . delete u . fromMaybe []
+    mapMChat cuuid u g = (liftIO $ H.lookup chats cuuid) >>= mapM_ g . delete u . fromMaybe []
     f loop _ (IAuthenticate user) = do
-      lift $ auth hdls authmv (Just (user,hdl))
+      hdl <- lift handle
+      liftIO $ auth hdls authmv (Just (user,hdl))
       yield (user,OAuthSuccess user)
       loop
     f loop (Just a) (IStartTyping c) = (mapMChat c a $ yield . (,OStartTyping a c)) >> loop
@@ -104,11 +99,11 @@ logic' hdl authmv hdls chats = fix $ \loop -> (lift $ readMVar authmv) >>= (awai
     f loop (Just a) (IMessage c k d) = (mapMChat c a $ yield . (,OMessage a c k d)) >> loop
     f loop (Just a) (ICreateChat us) = do
       let us' = nub $ a:us
-      cuuid <- lift $ nextRandom
-      lift $ H.insert chats cuuid us'
+      cuuid <- liftIO $ nextRandom
+      liftIO $ H.insert chats cuuid us'
       mapM_ (yield . (,OChatInclusion cuuid)) us'
       loop
-    f _ Nothing _ = lift $ closeWebsocketCode hdl unauthedError "not authenticated"
+    f _ Nothing _ = lift $ closeWSCode unauthedError "not authenticated"
     
 unauthedError :: Word16
 unauthedError = 101

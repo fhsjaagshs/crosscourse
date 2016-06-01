@@ -37,9 +37,11 @@ startServer port logic = withSocketsDo $ tcpSocket port >>= f
               hdl <- socketToHandle sock ReadWriteMode
               void $ forkIO $ wsHandshake hdl $ do
                 auth <- newMVar Nothing
-                runEffect $ websocket hdl >-> logic auth hdl
-                closeWebsocket hdl ""
+                runWebSocketT (runServer auth) hdl
             else close sock
+        runServer auth = do
+          runEffect $ websocket >-> logic auth >-> messageSink
+          closeWS ""
             
 -- |Bind to a TCP socket given a port using 'getAddrInfo' to
 -- find the appropriate binding addr. Adapted from 'bindPortTCP'

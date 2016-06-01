@@ -1,7 +1,8 @@
 module CrossCourse.Binary
 (
   encode',
-  runGetWith
+  runGetWith,
+  hPutBinary
 )
 where
   
@@ -10,6 +11,8 @@ import Data.Binary.Get
 
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
+
+import System.IO (Handle)
 
 encode' :: Binary a => a -> B.ByteString
 encode' = BL.toStrict . encode
@@ -27,3 +30,6 @@ runGetWith g carry src = d $ pushChunk (runGetIncremental g) carry
         ensureLength bs
           | B.null bs = Nothing
           | otherwise = Just bs
+          
+hPutBinary :: Binary a => Handle -> a -> IO ()
+hPutBinary hdl b = BL.hPut hdl $ encode b

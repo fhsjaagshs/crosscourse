@@ -13,14 +13,18 @@ Implements a 'Pipe' that supports the WebSockets protocol
 
 -}
 
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings,GeneralizedNewtypeDeriving #-}
 
 module CrossCourse.WebSocket
 (
   Message(..),
+  WebSocketT,
+  runWebSocketT,
+  handle,
   websocket,
-  closeWebsocket,
-  closeWebsocketCode
+  messageSink,
+  closeWS,
+  closeWSCode
 )
 where
 
@@ -30,9 +34,11 @@ import CrossCourse.WebSocket.Frame
 import Pipes
 import Control.Monad
 import Control.Monad.Fix
+import Control.Monad.Trans.Reader
 import System.IO
 
 import Data.Monoid
+import Data.Maybe
 import Data.Binary
 import Data.Binary.Put
 import qualified Data.ByteString as B
@@ -45,40 +51,54 @@ data Message = Message {
   messageIsBinary :: !Bool
 } deriving (Eq,Show)
 
-instance Binary Message where
-  put (Message p False) = put $ Frame True False False False TextFrame Nothing p
-  put (Message p True) = put $ Frame True False False False BinaryFrame Nothing p
-  get = fail "cannot read a message from binary"
+newtype WebSocketT m a = WebSocketT (ReaderT Handle m a)
+  deriving (Functor,Applicative,Monad,MonadTrans,MonadIO)
+  
+runWebSocketT :: WebSocketT m a -> Handle -> m a
+runWebSocketT (WebSocketT r) = runReaderT r
+
+handle :: Monad m => WebSocketT m Handle
+handle = WebSocketT ask 
   
 -- |WebSocket logic. Responds to incoming frames, closing @hdl@ if necessary.
 -- Yields 'Message's to be used in a pipeline.
-websocket :: Handle -> Producer Message IO ()
-websocket hdl = fromHandle' hdl >-> parseFrames hdl >-> demuxFrames hdl >-> evalFrames hdl
+websocket :: Producer Message (WebSocketT IO) ()
+websocket = fromHandle' >-> parseFrames >-> ensureMasked >-> demuxFrames >-> evalFrames
 
 -- |Creates a producer from a 'Handle'.
-fromHandle' :: Handle -> Producer B.ByteString IO ()
-fromHandle' h = fix $ \fx -> do
-  eof <- lift $ hIsEOF h
-  unless eof $ ((liftIO $ B.hGetNonBlocking h 4092) >>= yield) >> fx
+fromHandle' :: Producer B.ByteString (WebSocketT IO) ()
+fromHandle' = do
+  h <- lift handle
+  fix $ \loop -> do
+    eof <- liftIO $ hIsEOF h
+    unless eof $ do
+      bs <- liftIO $ B.hGetNonBlocking h 4092
+      yield bs
+      loop
 
 -- |Parses a stream of bytes as @Frame@s.       
-parseFrames :: Handle -> Pipe B.ByteString Frame IO ()
-parseFrames hdl = f ""
-  where l = lift . closeWebsocketCode hdl 1
+parseFrames :: Pipe B.ByteString Frame (WebSocketT IO) ()
+parseFrames = f ""
+  where l = lift . closeWSCode 1
         r (xs,frame) = yield frame >> f xs
         f xs = runGetWith get xs await >>= either l r
 
--- TODO: ignore unmasked frames
+ensureMasked :: Pipe Frame Frame (WebSocketT IO) ()
+ensureMasked = fix $ \fx -> do
+  f <- await
+  if isJust $ frameMask f
+    then yield f >> fx
+    else lift $ closeWSCode 2 "unexpected unmasked message."
 
 -- |Demultiplexes 'Frame's.
-demuxFrames :: Handle -> Pipe Frame Frame IO ()
-demuxFrames hdl = await >>= awaitConts
+demuxFrames :: Pipe Frame Frame (WebSocketT IO) ()
+demuxFrames = await >>= awaitConts
   where
     awaitConts f
       | frameFin f = yield f >> (await >>= awaitConts)
       | otherwise = do
         f2@(Frame fin _ _ _ typ2 _ _) <- await
-        when (typ2 /= ContinuationFrame) $ lift $ closeWebsocketCode hdl 2 "unexpected continuation frame"
+        when (typ2 /= ContinuationFrame) $ lift $ closeWSCode 2 "unexpected continuation frame"
         awaitConts $ f {
           frameFin = fin,
           frameMask = Nothing,
@@ -90,25 +110,37 @@ demuxFrames hdl = await >>= awaitConts
 -- * Closes the connection on 'CloseFrame's
 -- * Sends 'PongFrame's on 'PingFrame's
 -- * Ignores all other frames
-evalFrames :: Handle -> Pipe Frame Message IO ()
-evalFrames hdl = fix $ \fx -> do
-  f <- await
-  case frameType f of
-    TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> fx
-    BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> fx
-    CloseFrame  -> lift $ closeWebsocket hdl (frameUnmaskedPayload f)
-    PingFrame   -> do
-      lift $ B.hPut hdl $ encode' $ unmask f { frameType = PongFrame }
-      fx
-    _   -> return ()
+evalFrames :: Pipe Frame Message (WebSocketT IO) ()
+evalFrames = do
+  hdl <- lift handle
+  fix $ \fx -> do
+    f <- await
+    case frameType f of
+      TextFrame   -> (yield $ Message (frameUnmaskedPayload f) False) >> fx
+      BinaryFrame -> (yield $ Message (frameUnmaskedPayload f) True) >> fx
+      CloseFrame  -> lift $ closeWS $ frameUnmaskedPayload f
+      PingFrame   -> do
+        (liftIO $ hPutBinary hdl $ unmask f { frameType = PongFrame }) >> fx
+      _   -> return ()
+    
+-- |Consume messaging targeting tuples
+messageSink :: Consumer (Maybe (Handle,Message)) (WebSocketT IO) ()
+messageSink = fix $ \go -> (await >>= f) >> go
+  where f (Just (dest,msg)) = liftIO $ hPutBinary dest $ mkFrame msg
+        f _ = pure ()
+        mkFrame (Message p False) = Frame True False False False TextFrame Nothing p
+        mkFrame (Message p True) = Frame True False False False BinaryFrame Nothing p
 
--- |Closes a websocket given a handle.
-closeWebsocket :: Handle -> BL.ByteString -> IO ()
-closeWebsocket hdl reason = do
-  eof <- hIsEOF hdl
-  unless eof $ (B.hPut hdl $ encode' closeFrame) -- >> hClose hdl
-  where closeFrame = Frame True False False False CloseFrame Nothing reason
+-- |Closes a WebSocket given a binary payload
+closeWS :: MonadIO m => BL.ByteString -> WebSocketT m ()
+closeWS payload = do
+  hdl <- handle
+  liftIO $ do
+    eof <- hIsEOF hdl
+    unless eof $ hPutBinary hdl closeFrame >> hClose hdl
+    where closeFrame = Frame True False False False CloseFrame Nothing payload
   
-closeWebsocketCode :: Handle -> Word16 -> String -> IO ()
-closeWebsocketCode hdl code reason = closeWebsocket hdl $ (runPut $ putWord16be code) <> utf8Reason
-  where utf8Reason = TL.encodeUtf8 $ TL.pack reason
+-- |Close a websocket with an error code and message.
+closeWSCode :: MonadIO m => Word16 -> String -> WebSocketT m ()
+closeWSCode code message = closeWS $ (runPut $ putWord16be code) <> utf8Reason
+  where utf8Reason = TL.encodeUtf8 $ TL.pack message
