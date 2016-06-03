@@ -11,7 +11,6 @@ import CrossCourse.WebSocket.HTTP
 import CrossCourse.Logic
 
 import Pipes
-import Control.Monad
 import Control.Concurrent hiding (yield)
 import Control.Exception
 
@@ -20,6 +19,7 @@ import Network.Socket
 
 {-
 TODO:
+- @gzip@ WebSockets protocol
 - signal/exit handlers: close all websockets
   - de-auth: closing the connection should be as simple as exiting the pipe loop
 -}
@@ -35,13 +35,13 @@ startServer port logic = withSocketsDo $ tcpSocket port >>= f
           if isSupportedSockAddr saddr
             then do
               hdl <- socketToHandle sock ReadWriteMode
-              void $ forkIO $ wsHandshake hdl $ do
+              void $ forkIO $ wsHandshake hdl ["crosscourse"] $ do
                 auth <- newMVar Nothing
-                runWebSocketT (runServer auth) hdl
+                void $ runWebSocketT (runServer auth) hdl
             else close sock
         runServer auth = do
           runEffect $ websocket >-> logic auth >-> messageSink
-          closeWS ""
+          closeNormal
             
 -- |Bind to a TCP socket given a port using 'getAddrInfo' to
 -- find the appropriate binding addr. Adapted from 'bindPortTCP'

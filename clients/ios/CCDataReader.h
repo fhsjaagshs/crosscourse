@@ -35,6 +35,7 @@ extern NSString * const CCDataReaderTransactionException;
 
 - (void)matchUTF8String:(NSString *)string;
 - (BOOL)lookaheadMatchUTF8String:(NSString *)string;
+- (NSData *)matchUTF8StringRegex:(NSString *)pattern;
 - (NSData *)readLine;
 - (NSData *)readCRLFLine;
 

@@ -156,12 +156,27 @@ static NSUInteger const kChunkLen = 4092;
 }
 
 - (NSData *)readLine {
-    return [self takeWhile:^BOOL(uint8_t v) { return v != '\n'; }];
+    NSData *d = [self takeWhile:^BOOL(uint8_t v) { return v != '\n'; }];
+    [self matchUTF8String:@"\n"];
+    return d;
 }
 
 - (NSData *)readCRLFLine {
-    NSData *ln = [self readLine];
-    return [ln subdataWithRange:NSMakeRange(0, ln.length-1)];
+    NSData *ln = [self takeWhile:^BOOL(uint8_t v) { return v != '\r'; }];
+    [self matchUTF8String:@"\r\n"];
+    return ln;
+}
+
+#pragma mark - Regex Matching
+
+- (NSData *)matchUTF8StringRegex:(NSString *)pattern {
+    NSError *error = nil;
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:&error];
+    if (error) [self exception:error.localizedDescription];
+    
+    //TODO: implement
+    
+    return nil;
 }
 
 #pragma mark - Binary

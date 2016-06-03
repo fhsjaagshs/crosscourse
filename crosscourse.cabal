@@ -9,15 +9,15 @@ cabal-version:       >=1.10
 
 executable crosscourse
   main-is:             Main.hs
-  GHC-Options:         -Wall
+  GHC-Options:         -O3 -threaded -Wall
   build-depends:       base <4.9,
-                       transformers,
+                       mtl,
                        pipes,
                        memory,
                        bytestring,
                        base64-bytestring,
                        uuid,
-                       text,
+                       utf8-string,
                        hashtables,
                        cryptonite,
                        binary,

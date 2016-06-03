@@ -164,12 +164,15 @@
 
 - (void)websocketDidDisconnect:(CCWebSocket *)socket error:(NSError *)error {
     [self disconnect];
-    if (self.onError && error) {
-        self.onError(error);
-    }
     
-    if (self.onDisconnect) {
-        self.onDisconnect();
+    if (error) {
+        if (self.onError) {
+            self.onError(error);
+        }
+    } else {
+        if (self.onDisconnect) {
+            self.onDisconnect();
+        }
     }
 }
 

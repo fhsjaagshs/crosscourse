@@ -10,7 +10,6 @@ where
 import CrossCourse.WebSocket
 
 import Pipes
-import Control.Monad.Fix
 import Control.Concurrent hiding (yield)
 
 import System.IO
@@ -28,9 +27,11 @@ import Data.Binary.Put
 
 import qualified Data.HashTable.IO as H
 
+import Debug.Trace
+
 {-
 TODO
-- message read and delivered notifications
+- message read and message delivered commands
 - de-authenticate when closing ** server-wide
 - use a monad to handle auth, handletables, and the current handle.
   - could be used to fail and provide a reason, to be used by CrossCourse.Server
@@ -68,48 +69,49 @@ auth hdls authmv v = do
 
 -- |Deserialize incoming messages into 'Incoming's.
 deserialize :: Pipe Message Incoming (WebSocketT IO) ()
-deserialize = fix $ \loop -> do
-    Message msg isBinary <- await
-    if not isBinary
-      then lift $ closeWSCode invalidMessageError "utf8 message received"
-      else case runGetOrFail getIncoming msg of
-        Left (_,_,err) -> lift $ closeWSCode invalidMessageError err
-        Right (_,_,v) -> yield v >> loop
+deserialize = forever $ await >>= f . traceShowId
+  where f (Message _ False) = lift $ invalidData "expecting binary data"
+        f (Message msg True) = case runGetOrFail getIncoming msg of
+          Left (_,_,err) -> lift $ invalidData err
+          Right (_,_,v) -> yield v
 
 -- |Serialize ('UUID','Outgoing') pairs into something recognizeable by the server logic.
 serialize :: HandleTable -> Pipe (UUID,Outgoing) (Maybe (Handle,Message)) (WebSocketT IO) ()
-serialize hdls = fix $ \loop -> do
-  (uuid,outgoing) <- await
-  dest            <- liftIO $ H.lookup hdls uuid
-  let msg = Message (runPut $ putOutgoing outgoing) True
-  maybe (yield Nothing) (yield . Just . (,msg)) dest
-  loop
+serialize hdls = forever $ await >>= f
+  where f (uuid,outgoing) = do
+          dest <- liftIO $ H.lookup hdls uuid
+          let msg = Message (runPut $ putOutgoing outgoing) True
+          maybe (yield Nothing) (yield . Just . (,msg)) dest
 
 logic' :: Auth -> HandleTable -> ChatTable -> Pipe Incoming (UUID,Outgoing) (WebSocketT IO) ()
-logic' authmv hdls chats = fix $ \loop -> (liftIO $ readMVar authmv) >>= (await >>=) . f loop
+logic' mv hdls chats = forever $ await >>= f
   where
-    mapMChat cuuid u g = (liftIO $ H.lookup chats cuuid) >>= mapM_ g . delete u . fromMaybe []
-    f loop _ (IAuthenticate user) = do
-      hdl <- lift handle
-      liftIO $ auth hdls authmv (Just (user,hdl))
+    unauthenticated = lift $ cannotFulfill "not authenticated"
+    mapMChat c g = do
+      (ma,mc) <- liftIO $ (,) <$> readMVar mv <*> H.lookup chats c -- TODO: optimize me for when auth is Nothing
+      case ma of
+        Just a -> mapM_ (g a) $ delete a $ fromMaybe [] mc
+        _ -> unauthenticated
+    f (IAuthenticate user) = do
+      lift $ do
+        hdl <- handle
+        liftIO $ auth hdls mv $ Just (user,hdl)
       yield (user,OAuthSuccess user)
-      loop
-    f loop (Just a) (IStartTyping c) = (mapMChat c a $ yield . (,OStartTyping a c)) >> loop
-    f loop (Just a) (IStopTyping c) = (mapMChat c a $ yield . (,OStopTyping a c)) >> loop
-    f loop (Just a) (IMessage c k d) = (mapMChat c a $ yield . (,OMessage a c k d)) >> loop
-    f loop (Just a) (ICreateChat us) = do
-      let us' = nub $ a:us
-      cuuid <- liftIO $ nextRandom
-      liftIO $ H.insert chats cuuid us'
-      mapM_ (yield . (,OChatInclusion cuuid)) us'
-      loop
-    f _ Nothing _ = lift $ closeWSCode unauthedError "not authenticated"
-    
-unauthedError :: Word16
-unauthedError = 101
-
-invalidMessageError :: Word16
-invalidMessageError = 100
+    f (IStartTyping c) = mapMChat c $ \a us -> yield (us,OStartTyping a c)
+    f (IStopTyping c) = mapMChat c $ \a us -> yield (us,OStopTyping a c)
+    f (IMessage c k d) = mapMChat c $ \a us -> yield (us,OMessage a c k d)
+    f (ICreateChat us) = do
+      mtup <- liftIO $ do
+        ma <- readMVar mv
+        case ma of
+          Nothing -> return Nothing
+          Just a -> do
+            cuuid <- nextRandom
+            H.insert chats cuuid $ nub $ a:us
+            return $ Just (a,cuuid)
+      case mtup of
+        Nothing -> unauthenticated
+        Just (a,cuuid) -> mapM_ (yield . (,OChatInclusion cuuid)) (nub $ a:us)
 
 data Incoming
   = IAuthenticate

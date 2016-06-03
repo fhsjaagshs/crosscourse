@@ -20,11 +20,16 @@ module CrossCourse.WebSocket.Frame
   Frame(..),
   FrameType(..),
   frameUnmaskedPayload,
-  unmask
+  unmask,
+  isMasked,
+  isControl,
+  isContinuation,
+  isData
 )
 where
 
 import Data.Bits
+import Data.Maybe
 
 import Data.Binary
 import Data.Binary.Get
@@ -44,13 +49,31 @@ data Frame = Frame {
   framePayload :: !BL.ByteString
 } deriving (Eq,Show)
 
-unmask :: Frame -> Frame
-unmask f = f { frameMask = Nothing, framePayload = frameUnmaskedPayload f}
-
 frameUnmaskedPayload :: Frame -> BL.ByteString
 frameUnmaskedPayload (Frame _ _ _ _ _ Nothing pl) = pl
 frameUnmaskedPayload (Frame _ _ _ _ _ (Just mask) pl) = snd $ BL.mapAccumL f 0 pl
   where f !i !c = ((i + 1) `mod` (B.length mask), (B.index mask i) `xor` c)
+
+unmask :: Frame -> Frame
+unmask f = f { frameMask = Nothing, framePayload = frameUnmaskedPayload f}
+
+isMasked :: Frame -> Bool
+isMasked = isJust . frameMask
+
+isControl :: Frame -> Bool
+isControl (Frame _ _ _ _ CloseFrame _ _) = True
+isControl (Frame _ _ _ _ PingFrame _ _) = True
+isControl (Frame _ _ _ _ PongFrame _ _) = True
+isControl _ = False
+
+isContinuation :: Frame -> Bool
+isContinuation (Frame _ _ _ _ ContinuationFrame _ _) = True
+isContinuation _ = False
+
+isData :: Frame -> Bool
+isData (Frame _ _ _ _ TextFrame _ _) = True
+isData (Frame _ _ _ _ BinaryFrame _ _) = True
+isData _ = False
 
 -- |The type of WebSockets frame.
 data FrameType
@@ -69,7 +92,7 @@ instance Binary Frame where
   
     ft <- convertOpcode $ opcode b0
     
-    let isMasked = b1 .&. 0x80 == 0x80
+    let hasMask = b1 .&. 0x80 == 0x80
         lenflag = fromIntegral $ b1 .&. 0x7f
 
     len <- case lenflag of
@@ -77,7 +100,7 @@ instance Binary Frame where
       127 -> fromIntegral <$> getWord64be
       _   -> return lenflag
 
-    maybeMask <- case isMasked of
+    maybeMask <- case hasMask of
       True -> Just <$> getByteString 4
       False -> return Nothing
       

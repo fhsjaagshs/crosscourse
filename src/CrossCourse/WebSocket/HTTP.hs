@@ -72,30 +72,32 @@ mkBadRequestResponse msg = BL.toStrict $ runPut $ do
   putByteString "\r\n"
   putByteString msg
   
-mkHandshakeResponse :: B.ByteString -> B.ByteString
-mkHandshakeResponse wskey = BL.toStrict $ runPut $ do
+mkHandshakeResponse :: [B.ByteString] -> B.ByteString -> B.ByteString
+mkHandshakeResponse pcols wskey = BL.toStrict $ runPut $ do
   putByteString "HTTP/1.1 101 Switching Protocols\r\n"
   putHeader "Upgrade" "websocket"
   putHeader "Connection" "Upgrade"
   putHeader "Sec-WebSocket-Accept" $ calculateAccept wskey
-  putHeader "Sec-WebSocket-Protocol" "crosscourse"
+  putHeader "Sec-WebSocket-Protocol" (mconcat $ intersperse "," pcols)
   putByteString "\r\n"
   where
     magicString = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
     sha1hash = (convert :: Digest SHA1 -> B.ByteString) . hash
     calculateAccept = B64.encode . sha1hash . flip mappend magicString
+    
+-- TODO: compare origins via https://tools.ietf.org/id/draft-abarth-origin-03.html
 
-wsHandshake :: Handle -> IO () -> IO ()
-wsHandshake hdl success = parseWith chunk request "" >>= maybe badRequest f . maybeResult
+wsHandshake :: Handle -> [B.ByteString] -> IO () -> IO ()
+wsHandshake hdl pcols success = parseWith chunk request "" >>= maybe badRequest f . maybeResult
     where
       f (Request "GET" _ "1.1",hdrs) = do
         let hdrs' = map (\(Header k vs) -> (BC.map toLower k,mconcat vs)) hdrs
+        let matchedPcols = maybe [] (intersect pcols . BC.split ',') $ lookup "sec-websocket-protocol" hdrs'
         flushBody hdrs'
-        maybe badRequest ((>> success) . B.hPut hdl . mkHandshakeResponse) $ do
-          ensure "Upgrade"     $ lookup "connection"             hdrs'
-          ensure "websocket"   $ lookup "upgrade"                hdrs'
-          ensure "13"          $ lookup "sec-websocket-version"  hdrs'
-          ensure "crosscourse" $ lookup "sec-websocket-protocol" hdrs'
+        maybe badRequest ((>> success) . B.hPut hdl . mkHandshakeResponse matchedPcols) $ do
+          ensure "Upgrade"   $ lookup "connection"             hdrs'
+          ensure "websocket" $ lookup "upgrade"                hdrs'
+          ensure "13"        $ lookup "sec-websocket-version"  hdrs'
           lookup "sec-websocket-key" hdrs'
       f _ = badRequest
       chunk = B.hGetSome hdl 4092

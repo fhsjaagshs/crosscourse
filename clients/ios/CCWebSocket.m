@@ -178,7 +178,8 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
         
         [self.inputReader beginTransaction];
         
-        [self.inputReader matchUTF8String:@"HTTP/1.1 101 Switching Protocols\r\n"];
+        [self.inputReader matchUTF8String:@"HTTP/1.1 101"];
+        [self.inputReader readCRLFLine];
         
         while (![self.inputReader lookaheadMatchUTF8String:@"\r\n"]) {
             NSString *k = [[NSString alloc]initWithData:[self.inputReader takeWhile:^BOOL(uint8_t v) {
@@ -265,7 +266,7 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
                     e = [self errorWithCode:500 message:@"Invalid close frame."];
                 }
             }
-            
+            NSLog(@"%@",e);
             [self closeWithError:e];
         } else if (f.type == CCFrameTypePing) {
             [self closeWithError:[self errorWithCode:500 message:@"The client should never receive ping frames."]];
@@ -423,7 +424,7 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
         case NSStreamEventHasSpaceAvailable: break;
         case NSStreamEventHasBytesAvailable: {
             if (self.security && ![self validateCertificate:aStream]) {
-                [self closeWithError:[self errorWithCode:400 message:@"Invalid SSL certificate."]];
+                [self closeWithError:[self errorWithCode:1015 message:@"Invalid SSL certificate."]];
             } else if (aStream == self.inputStream) {
                 [self.inputReader bufferFrom:self.inputStream];
                 [self processInput];
