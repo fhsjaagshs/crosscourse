@@ -104,12 +104,13 @@ logic' mv hdls chats = forever $ await >>= f
         case ma of
           Nothing -> return Nothing
           Just a -> do
+            let us' = nub $ a:us
             cuuid <- nextRandom
-            H.insert chats cuuid $ nub $ a:us
-            return $ Just (a,cuuid)
+            H.insert chats cuuid us'
+            return $ Just (us',cuuid)
       case mtup of
         Nothing -> unauthenticated
-        Just (a,cuuid) -> mapM_ (yield . (,OChatInclusion cuuid)) (nub $ a:us)
+        Just (us',cuuid) -> mapM_ (yield . (,OChatInclusion cuuid)) us'
 
 data Incoming
   = IAuthenticate
