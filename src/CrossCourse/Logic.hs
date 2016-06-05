@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings,TupleSections #-}
+{-# LANGUAGE OverloadedStrings,TupleSections,FlexibleContexts #-}
 module CrossCourse.Logic
 (
   Logic,
@@ -26,8 +26,6 @@ import Data.Binary.Get
 import Data.Binary.Put
 
 import qualified Data.HashTable.IO as H
-
-import Debug.Trace
 
 {-
 TODO
@@ -69,7 +67,7 @@ auth hdls authmv v = do
 
 -- |Deserialize incoming messages into 'Incoming's.
 deserialize :: Pipe Message Incoming (WebSocketT IO) ()
-deserialize = forever $ await >>= f . traceShowId
+deserialize = forever $ await >>= f
   where f (Message _ False) = lift $ invalidData "expecting binary data"
         f (Message msg True) = case runGetOrFail getIncoming msg of
           Left (_,_,err) -> lift $ invalidData err

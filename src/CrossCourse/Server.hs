@@ -35,6 +35,7 @@ startServer port logic = withSocketsDo $ tcpSocket port >>= f
           if isSupportedSockAddr saddr
             then do
               hdl <- socketToHandle sock ReadWriteMode
+              hSetBuffering hdl NoBuffering
               void $ forkIO $ wsHandshake hdl ["crosscourse"] $ do
                 auth <- newMVar Nothing
                 void $ runWebSocketT (runServer auth) hdl

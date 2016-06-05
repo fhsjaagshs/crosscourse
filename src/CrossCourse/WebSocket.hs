@@ -13,7 +13,7 @@ Implements a 'Pipe' that supports the WebSockets protocol
 
 -}
 
-{-# LANGUAGE TupleSections,OverloadedStrings,GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE TupleSections,FlexibleContexts,OverloadedStrings #-}
 
 module CrossCourse.WebSocket
 (
@@ -24,7 +24,6 @@ module CrossCourse.WebSocket
 )
 where
 
-import CrossCourse.Binary
 import CrossCourse.WebSocket.Frame
 import CrossCourse.WebSocket.Monad
 
@@ -33,6 +32,7 @@ import System.IO
 
 import Data.Monoid
 import Data.Binary
+import Data.Binary.Get
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 
@@ -45,31 +45,31 @@ data Message = Message {
 -- |WebSocket logic. Responds to incoming frames, closing @hdl@ if necessary.
 -- Yields 'Message's to be used in a pipeline.
 websocket :: MonadIO m => Producer Message (WebSocketT m) ()
-websocket = readSocket >-> parseFrames >-> ensureSane >-> demuxFrames >-> evalFrames
+websocket = frames >-> ensureSane >-> demuxFrames >-> evalFrames 
 
--- |Reads bytes from the websocket.
-readSocket :: MonadIO m => Producer B.ByteString (WebSocketT m) ()
-readSocket = do
+frames :: MonadIO m => Producer Frame (WebSocketT m) ()
+frames = do
   h <- lift handle
-  fix $ \loop -> do
-    mbytes <- liftIO $ maybeRead h
-    case mbytes of
-      Just bytes -> yield bytes >> loop
-      Nothing -> lift $ closeNormal
+  let f xs = runGetWith get (src h) xs >>= either l r
+      l = lift . invalidData
+      r (xs',frame) = yield frame >> f xs'
+  f "" -- will run forever
   where
-    maybeRead h = do
-      unavailable <- (||) <$> hIsEOF h <*> hIsClosed h
+    src h = liftIO $ do
+      unavailable <- hIsClosed h
       if unavailable
         then return Nothing
         else Just <$> B.hGetNonBlocking h 4092
-
--- |Parses a stream of bytes as @Frame@s.       
-parseFrames :: MonadIO m => Pipe B.ByteString Frame (WebSocketT m) ()
-parseFrames = forever $ f ""
-  where l = lift . invalidData
-        r ("",frame) = yield frame
-        r (xs,frame) = yield frame >> f xs
-        f xs = runGetWith get await xs >>= either l r
+        
+runGetWith :: (Monad m, Binary a)
+           => Get a
+           -> m (Maybe B.ByteString) -- ^ action to read in data
+           -> B.ByteString -- ^ data to feed in that was leftover from previous runs
+           -> m (Either String (B.ByteString,a))
+runGetWith g src = d . pushChunk (runGetIncremental g)
+  where d (Partial f) = src >>= d . f
+        d (Done leftover _ result) = return $ Right (leftover,result)
+        d (Fail _ _ err) = return $ Left err
 
 -- |Ensures frames are masked & secure, as per the WebSockets RFC.
 ensureSane :: MonadIO m => Pipe Frame Frame (WebSocketT m) ()
@@ -82,19 +82,17 @@ ensureSane = forever $ await >>= go
 
 -- |Demultiplexes 'Frame's.
 demuxFrames :: MonadIO m => Pipe Frame Frame (WebSocketT m) ()
-demuxFrames = forever $ awaitData >>= awaitConts
+demuxFrames = forever $ awaitFrame isData >>= awaitConts
   where
-    awaitData = awaitFrame isData "expected data frame"
-    awaitContinuation = awaitFrame isContinuation "expected continuation frame"
-    awaitFrame p err = do
+    awaitFrame p = do
       f <- await
-      if isControl f then yield f >> awaitFrame p err
+      if isControl f then yield f >> awaitFrame p
         else if p f then return f
-          else lift $ protocolError err
+          else lift $ protocolError $ "unexpected " ++ (show $ frameType f)
     awaitConts f
       | frameFin f = yield f
       | otherwise = do
-        f2 <- awaitContinuation
+        f2 <- awaitFrame isContinuation
         awaitConts $ f {
           frameFin = frameFin f2,
           frameMask = Nothing,
@@ -113,14 +111,14 @@ evalFrames = forever $ await >>= go
     go f@(Frame _ _ _ _ BinaryFrame _ _) = yield $ Message (frameUnmaskedPayload f) True
     go f@(Frame _ _ _ _ CloseFrame _ _) = throwError $ frameUnmaskedPayload f
     go f@(Frame _ _ _ _ PingFrame _ _) = lift $ do
-      hdl <- handle
-      liftIO $ hPutBinary hdl $ unmask f { frameType = PongFrame }
+      h <- handle
+      liftIO $ BL.hPut h $ encode $ unmask f { frameType = PongFrame }
     go   (Frame _ _ _ _ PongFrame _ _) = return ()
     go   (Frame _ _ _ _ ContinuationFrame _ _) = lift $ protocolError "unexpected continuation frame"
     
 -- |Consume messaging targeting tuples
 messageSink :: MonadIO m => Consumer (Maybe (Handle,Message)) (WebSocketT m) ()
 messageSink = forever $ await >>= maybe (pure ()) f
-  where f (dest,msg) = liftIO $ hPutBinary dest $ mkFrame msg
+  where f (dest,msg) = liftIO $ BL.hPut dest $ encode $ mkFrame msg-- hPutBinary dest $ mkFrame msg
         mkFrame (Message p False) = Frame True False False False TextFrame Nothing p
         mkFrame (Message p True) = Frame True False False False BinaryFrame Nothing p

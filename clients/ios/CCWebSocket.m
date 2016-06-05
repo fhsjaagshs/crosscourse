@@ -260,13 +260,14 @@ static NSString *const kHeaderWSVersion  = @"Sec-WebSocket-Version";
                 @try {
                     CCDataReader *r = [CCDataReader dataReaderWithData:f.payload.mutableCopy];
                     uint16_t code = [r read16BitUnsignedIntegerBigEndian];
-                    NSString *message = [[NSString alloc]initWithData:[r takeAll] encoding:NSUTF8StringEncoding];
-                    e = [self serverErrorWithCode:code message:message];
+                    if (code != 1000) { // N.B. an error code of 1000 means "normal shutdown"
+                        NSString *message = [[NSString alloc]initWithData:[r takeAll] encoding:NSUTF8StringEncoding];
+                        e = [self serverErrorWithCode:code message:message];
+                    }
                 } @catch (NSException *exception) {
                     e = [self errorWithCode:500 message:@"Invalid close frame."];
                 }
             }
-            NSLog(@"%@",e);
             [self closeWithError:e];
         } else if (f.type == CCFrameTypePing) {
             [self closeWithError:[self errorWithCode:500 message:@"The client should never receive ping frames."]];
