@@ -9,11 +9,12 @@ Most chat logic; you can create chat rooms, send messages, and get typing notifi
 ### Not currently implemented
 
 - Persistence
-	- persistence mechanism TDB
+	- persistence mechanism TBD
 - Read/delivered receipts & timestamps
 - Push notifications †
 - Message synchronization †
 - Clustering †
+- Timeout on lack of ping/pong
 - Miscellaneous tits & bits
 
 The items with a dagger require persistence.
@@ -29,6 +30,7 @@ You'll need cabal & ghc installed. Once/if you have them installed
     git clone git@github.com:fhsjaagshs/crosscourse.git
     cd crosscourse
     cabal sandbox init
+    cabal install --dependencies-only
     cabal build
     
 ### Running the server
@@ -37,7 +39,7 @@ It's simple to run once compiled
 
     PORT=3000 dist/build/crosscourse/crosscourse
     
-It takes the ENV variable `PORT` to determine which port it runs on.
+It takes the ENV variable `PORT` to determine which port it runs on. Useful for Heroku
 
 ### The Protocol
 
